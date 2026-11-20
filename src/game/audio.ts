@@ -1,6 +1,28 @@
-import { ElementType } from './types';
+import { ElementType, LoreMood, LoreTale } from './types';
 
 export type CrashMaterial = 'stone' | 'wood' | 'water' | 'flesh';
+export type KnightVoiceCategory =
+  | 'takeoff'
+  | 'boost'
+  | 'combat_start'
+  | 'battle_cry'
+  | 'sword_kill'
+  | 'danger'
+  | 'victory';
+
+const KNIGHT_VOICE_LINES: Record<KnightVoiceCategory, string[]> = {
+  takeoff: ['هيا بنا صغيري!', 'فلنحلق بقوة!'],
+  boost: ['فلنحلق بقوة!', 'هيا بنا صغيري!'],
+  combat_start: ['لنرى ما يمكن أن نفعله!', 'فلنحلق بقوة!', 'هيا بنا صغيري!'],
+  battle_cry: [
+    'الله أكبر!',
+    'كما قال غزاوي، يجب أن نقص الرؤوس!',
+    'لنرى ما يمكن أن نفعله!',
+  ],
+  sword_kill: ['الله أكبر!', 'كما قال غزاوي، يجب أن نقص الرؤوس!'],
+  danger: ['يجب أن ندافع عن أميرنا!', 'الله أكبر!'],
+  victory: ['الله أكبر!', 'هيا بنا صغيري!'],
+};
 
 export class DragonAudio {
   private ctx: AudioContext | null = null;
@@ -17,6 +39,16 @@ export class DragonAudio {
   private initialized = false;
   private lastBreathSound = 0;
   private lastImpactSound = 0;
+  private lastHornSound = 0;
+  private lastVoiceTime = 0;
+  private voiceLineIndex = 0;
+  private preferredArabicVoice: SpeechSynthesisVoice | null = null;
+  private loreSessionId = 0;
+  private loreTimerId: number | null = null;
+  private loreChordTimerId: number | null = null;
+  private loreDroneOsc1: OscillatorNode | null = null;
+  private loreDroneOsc2: OscillatorNode | null = null;
+  private loreDroneGain: GainNode | null = null;
 
   public init(): void {
     if (this.initialized) {
@@ -118,6 +150,10 @@ export class DragonAudio {
 
   public setMuted(mute: boolean): void {
     this.muted = mute;
+    if (mute) {
+      this.stopLoreTale();
+      this.stopVoice();
+    }
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(mute ? 0 : 0.48, this.ctx.currentTime, 0.08);
     }
@@ -685,7 +721,369 @@ export class DragonAudio {
     osc.stop(now + 0.32);
   }
 
+  /**
+   * High-energy steel clash + incandescent spark crackle when broadsword strikes stone castle walls or ship armor.
+   */
+  public playSwordSpark(): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+    const clangFreqs = [1480, 2320, 3490, 4820];
+    clangFreqs.forEach((f, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = idx % 2 === 0 ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(f * (0.97 + Math.random() * 0.06), now);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.88, now + 0.34);
+      gain.gain.setValueAtTime(0.14 / (idx + 1), now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.38);
+    });
+
+    const sizzle = this.ctx.createBufferSource();
+    sizzle.buffer = this.crackleBuffer ?? this.noiseBuffer;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(2400, now);
+    const sGain = this.ctx.createGain();
+    sGain.gain.setValueAtTime(0.001, now);
+    sGain.gain.linearRampToValueAtTime(0.28, now + 0.015);
+    sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    sizzle.connect(hp);
+    hp.connect(sGain);
+    sGain.connect(this.masterGain);
+    sizzle.start(now);
+    sizzle.stop(now + 0.3);
+  }
+
+  /**
+   * Directional medieval dragon-war brass horn positioned in stereo space toward the attacking threat.
+   * pan: -1 (far left) to +1 (far right); distanceRatio: 0.25 (far) to 1.0 (close).
+   */
+  public playWarHorn(pan = 0, distanceRatio = 0.85): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+    if (now - this.lastHornSound < 7.5) return;
+    this.lastHornSound = now;
+
+    const vol = Math.max(0.24, Math.min(1.0, distanceRatio));
+    const panner =
+      typeof this.ctx.createStereoPanner === 'function' ? this.ctx.createStereoPanner() : null;
+    if (panner) {
+      panner.pan.setValueAtTime(Math.max(-1, Math.min(1, pan)), now);
+      panner.connect(this.masterGain);
+    }
+    const outNode: AudioNode = panner ?? this.masterGain;
+
+    // Two echoing war horn blasts (low deep call -> urgent fifth rise)
+    const blasts = [
+      { offset: 0, baseFreq: 108, endFreq: 116, dur: 0.95 },
+      { offset: 0.62, baseFreq: 144, endFreq: 162, dur: 1.45 },
+    ];
+
+    for (const b of blasts) {
+      const start = now + b.offset;
+      const oscA = this.ctx.createOscillator();
+      const oscB = this.ctx.createOscillator();
+      const brassFilter = this.ctx.createBiquadFilter();
+      const gain = this.ctx.createGain();
+
+      oscA.type = 'sawtooth';
+      oscB.type = 'sawtooth';
+      oscA.frequency.setValueAtTime(b.baseFreq * 0.92, start);
+      oscA.frequency.exponentialRampToValueAtTime(b.endFreq, start + 0.16);
+      oscA.frequency.setValueAtTime(b.endFreq, start + b.dur * 0.72);
+      oscA.frequency.exponentialRampToValueAtTime(b.endFreq * 0.94, start + b.dur);
+
+      oscB.frequency.setValueAtTime(b.baseFreq * 1.49, start);
+      oscB.frequency.exponentialRampToValueAtTime(b.endFreq * 1.5, start + 0.18);
+
+      brassFilter.type = 'bandpass';
+      brassFilter.Q.value = 1.65;
+      brassFilter.frequency.setValueAtTime(340, start);
+      brassFilter.frequency.exponentialRampToValueAtTime(620, start + 0.22);
+      brassFilter.frequency.exponentialRampToValueAtTime(280, start + b.dur);
+
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.linearRampToValueAtTime(0.32 * vol, start + 0.09);
+      gain.gain.setValueAtTime(0.28 * vol, start + b.dur * 0.62);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + b.dur);
+
+      oscA.connect(brassFilter);
+      oscB.connect(brassFilter);
+      brassFilter.connect(gain);
+      gain.connect(outNode);
+      oscA.start(start);
+      oscB.start(start);
+      oscA.stop(start + b.dur + 0.05);
+      oscB.stop(start + b.dur + 0.05);
+
+      // Air breath through giant horn bore
+      const bore = this.ctx.createBufferSource();
+      bore.buffer = this.noiseBuffer;
+      const bFilter = this.ctx.createBiquadFilter();
+      bFilter.type = 'bandpass';
+      bFilter.frequency.value = 460;
+      const bGain = this.ctx.createGain();
+      bGain.gain.setValueAtTime(0.001, start);
+      bGain.gain.linearRampToValueAtTime(0.11 * vol, start + 0.08);
+      bGain.gain.exponentialRampToValueAtTime(0.001, start + b.dur * 0.85);
+      bore.connect(bFilter);
+      bFilter.connect(bGain);
+      bGain.connect(outNode);
+      bore.start(start);
+      bore.stop(start + b.dur);
+    }
+  }
+
+  private resolveArabicVoice(): SpeechSynthesisVoice | null {
+    if (this.preferredArabicVoice) return this.preferredArabicVoice;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices.length) return null;
+    const exact =
+      voices.find((v) => /^ar[-_]?sa/i.test(v.lang)) ??
+      voices.find((v) => /^ar[-_]?eg/i.test(v.lang)) ??
+      voices.find((v) => /^ar/i.test(v.lang)) ??
+      null;
+    if (exact) {
+      this.preferredArabicVoice = exact;
+    }
+    return exact;
+  }
+
+  /**
+   * Speaks Classical Arabic heroic battle lines for the Dragon Knight using Web Speech Synthesis.
+   */
+  public speakKnight(category: KnightVoiceCategory, force = false): void {
+    if (this.muted || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    const nowMs = performance.now();
+    if (!force && nowMs - this.lastVoiceTime < 4600) return;
+    if (force && nowMs - this.lastVoiceTime < 1400) return;
+    this.lastVoiceTime = nowMs;
+
+    const pool = KNIGHT_VOICE_LINES[category];
+    const line = pool[this.voiceLineIndex % pool.length];
+    this.voiceLineIndex += 1;
+
+    try {
+      const synth = window.speechSynthesis;
+      if (force) {
+        synth.cancel();
+      } else if (synth.speaking) {
+        return;
+      }
+
+      const utter = new SpeechSynthesisUtterance(line);
+      utter.lang = 'ar-SA';
+      const voice = this.resolveArabicVoice();
+      if (voice) {
+        utter.voice = voice;
+        utter.lang = voice.lang;
+      }
+      utter.pitch = category === 'battle_cry' || category === 'sword_kill' ? 0.82 : 0.88;
+      utter.rate = category === 'danger' || category === 'battle_cry' ? 1.08 : 1.02;
+      utter.volume = 0.92;
+      synth.speak(utter);
+    } catch {
+      // Ignore browser speech synthesis blocking if autoplay policy applies
+    }
+  }
+
+  private startLoreSoundscape(mood: LoreMood): void {
+    this.stopLoreSoundscape();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // Mood-specific ancient modal drone frequencies (Dorian / Hijaz / Bayati hues)
+    const roots: Record<LoreMood, [number, number]> = {
+      fire: [110, 165],
+      storm: [98, 146.83],
+      steel: [123.47, 185],
+      forest: [130.81, 196],
+      stone: [87.31, 130.81],
+      royal: [146.83, 220],
+    };
+    const [f1, f2] = roots[mood];
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(340, now);
+
+    const droneGain = this.ctx.createGain();
+    droneGain.gain.setValueAtTime(0.001, now);
+    droneGain.gain.linearRampToValueAtTime(0.085, now + 1.1);
+
+    const osc1 = this.ctx.createOscillator();
+    osc1.type = 'triangle';
+    osc1.frequency.setValueAtTime(f1, now);
+
+    const osc2 = this.ctx.createOscillator();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(f2, now);
+
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(droneGain);
+    droneGain.connect(this.masterGain);
+    osc1.start(now);
+    osc2.start(now);
+
+    this.loreDroneOsc1 = osc1;
+    this.loreDroneOsc2 = osc2;
+    this.loreDroneGain = droneGain;
+
+    // Gentle medieval plucked string notes every 2.4 seconds
+    const scale = [f1 * 2, f1 * 2.25, f1 * 2.667, f2 * 2, f1 * 3];
+    let step = 0;
+    const pluck = () => {
+      if (!this.ctx || !this.masterGain || this.muted) return;
+      const t = this.ctx.currentTime;
+      const noteFreq = scale[step % scale.length];
+      step += 1;
+      const o = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      const lp = this.ctx.createBiquadFilter();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(noteFreq, t);
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(1100, t);
+      lp.frequency.exponentialRampToValueAtTime(280, t + 1.6);
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(0.06, t + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 1.75);
+      o.connect(lp);
+      lp.connect(g);
+      g.connect(this.masterGain);
+      o.start(t);
+      o.stop(t + 1.8);
+    };
+    pluck();
+    this.loreChordTimerId = window.setInterval(pluck, 2400);
+  }
+
+  private stopLoreSoundscape(): void {
+    if (this.loreChordTimerId !== null) {
+      clearInterval(this.loreChordTimerId);
+      this.loreChordTimerId = null;
+    }
+    if (this.loreDroneGain && this.ctx) {
+      const now = this.ctx.currentTime;
+      this.loreDroneGain.gain.setTargetAtTime(0.0001, now, 0.15);
+    }
+    const o1 = this.loreDroneOsc1;
+    const o2 = this.loreDroneOsc2;
+    this.loreDroneOsc1 = null;
+    this.loreDroneOsc2 = null;
+    this.loreDroneGain = null;
+    window.setTimeout(() => {
+      try {
+        o1?.stop();
+        o2?.stop();
+      } catch {
+        // Ignore already stopped
+      }
+    }, 220);
+  }
+
+  /**
+   * Narrates an ancient Dragon Knight legend segment-by-segment in Classical Arabic
+   * over an immersive medieval drone/oud sanctuary soundscape.
+   */
+  public playLoreTale(
+    tale: LoreTale,
+    onStateChange: (taleId: string | null, segmentIdx: number, playing: boolean) => void,
+  ): void {
+    this.init();
+    this.stopLoreTale();
+    if (this.muted) {
+      onStateChange(null, 0, false);
+      return;
+    }
+
+    const session = ++this.loreSessionId;
+    this.startLoreSoundscape(tale.mood);
+
+    const speakSegment = (idx: number) => {
+      if (this.loreSessionId !== session || this.muted) return;
+      if (idx >= tale.segments.length) {
+        this.stopLoreSoundscape();
+        onStateChange(tale.id, tale.segments.length - 1, false);
+        return;
+      }
+
+      onStateChange(tale.id, idx, true);
+      const line = tale.segments[idx];
+      const fallbackMs = Math.max(4200, Math.min(11500, line.length * 88));
+
+      let advanced = false;
+      const advance = () => {
+        if (advanced || this.loreSessionId !== session) return;
+        advanced = true;
+        if (this.loreTimerId !== null) {
+          clearTimeout(this.loreTimerId);
+          this.loreTimerId = null;
+        }
+        this.loreTimerId = window.setTimeout(() => speakSegment(idx + 1), 350);
+      };
+
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try {
+          const synth = window.speechSynthesis;
+          synth.cancel();
+          const utter = new SpeechSynthesisUtterance(line);
+          utter.lang = 'ar-SA';
+          const voice = this.resolveArabicVoice();
+          if (voice) {
+            utter.voice = voice;
+            utter.lang = voice.lang;
+          }
+          // Reflective knight storyteller tone inside sanctuary
+          utter.pitch = 0.84;
+          utter.rate = 0.92;
+          utter.volume = 0.95;
+          utter.onend = advance;
+          utter.onerror = advance;
+          synth.speak(utter);
+          // Safety ceiling so browsers without speech audio output still advance smoothly
+          this.loreTimerId = window.setTimeout(advance, fallbackMs + 3500);
+          return;
+        } catch {
+          // Fallback to reading timer below
+        }
+      }
+
+      this.loreTimerId = window.setTimeout(advance, fallbackMs);
+    };
+
+    speakSegment(0);
+  }
+
+  public stopLoreTale(): void {
+    this.loreSessionId += 1;
+    if (this.loreTimerId !== null) {
+      clearTimeout(this.loreTimerId);
+      this.loreTimerId = null;
+    }
+    this.stopLoreSoundscape();
+    this.stopVoice();
+  }
+
+  public stopVoice(): void {
+    try {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
   public dispose(): void {
+    this.stopLoreTale();
     if (this.ctx) {
       void this.ctx.close();
       this.ctx = null;

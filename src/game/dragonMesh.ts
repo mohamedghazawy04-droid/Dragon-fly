@@ -29,6 +29,7 @@ export interface DragonRig {
   swordArmGroup: THREE.Group;
   leftReinStrap: THREE.Mesh;
   rightReinStrap: THREE.Mesh;
+  swordBladeMat: THREE.MeshPhysicalMaterial;
   auraLight: THREE.PointLight;
   setFrozen: (frozen: boolean) => void;
   dispose: () => void;
@@ -379,28 +380,45 @@ export function createArticulatedRiderRig(): ArticulatedRiderRig {
   crest.castShadow = true;
   head.add(crest);
 
-  // Articulated Left & Right Arms
+  // Articulated Left & Right Arms with Gauntlets, Fingers & Faceted Broadsword
   const buildArm = (xOff: number, withSword: boolean) => {
     const arm = new THREE.Group();
     arm.position.set(xOff, 1.84, 0);
-    const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.56, 5, 8), armorMat);
-    sleeve.position.set(0, -0.34, 0);
-    sleeve.castShadow = true;
-    arm.add(sleeve);
+    const upper = new THREE.Mesh(new THREE.CapsuleGeometry(0.105, 0.28, 5, 8), clothMat);
+    upper.position.set(0, -0.18, 0);
+    upper.castShadow = true;
+    arm.add(upper);
+
+    const vambrace = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.082, 0.34, 8), armorMat);
+    vambrace.position.set(0, -0.48, -0.04);
+    vambrace.rotation.x = 0.12;
+    vambrace.castShadow = true;
+    arm.add(vambrace);
+
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.12, 0.14), armorMat);
+    palm.position.set(0, -0.68, -0.07);
+    arm.add(palm);
+
+    for (let f = 0; f < 4; f++) {
+      const knuckle = new THREE.Mesh(new THREE.CapsuleGeometry(0.016, 0.07, 4, 6), armorMat);
+      knuckle.rotation.x = Math.PI / 2;
+      knuckle.position.set(-0.036 + f * 0.024, -0.72, -0.14);
+      arm.add(knuckle);
+    }
 
     let swordMesh!: THREE.Mesh;
     if (withSword) {
-      const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.32, 6), goldMat);
+      const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.036, 0.3, 8), goldMat);
       hilt.rotation.x = Math.PI / 2;
-      hilt.position.set(0, -0.68, -0.1);
+      hilt.position.set(0, -0.71, -0.12);
       arm.add(hilt);
 
-      const guard = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.05, 0.06), goldMat);
-      guard.position.set(0, -0.68, -0.24);
+      const guard = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.045, 0.055), goldMat);
+      guard.position.set(0, -0.71, -0.26);
       arm.add(guard);
 
-      swordMesh = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 1.35), bladeMat);
-      swordMesh.position.set(0, -0.68, -0.94);
+      swordMesh = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.095, 1.48), bladeMat);
+      swordMesh.position.set(0, -0.71, -1.02);
       swordMesh.castShadow = true;
       arm.add(swordMesh);
     }
@@ -675,20 +693,32 @@ export function createDragonRig(
   bodyGroup.add(riderCameraAnchor);
 
   // 3. Detailed Armored Dragon Rider (visible on AI dragons & in 3rd-person Full Dragon View!)
-  const gauntletMat = new THREE.MeshStandardMaterial({
-    color: isPlayer ? 0x2b3342 : team === 'enemy' ? 0x241d22 : 0x26354d,
-    roughness: 0.24,
-    metalness: 0.88,
-  });
-  const hiltMat = new THREE.MeshStandardMaterial({
-    color: 0xd49b35,
+  const gauntletMat = new THREE.MeshPhysicalMaterial({
+    color: isPlayer ? 0x2c3647 : team === 'enemy' ? 0x241d22 : 0x26354d,
     roughness: 0.22,
-    metalness: 0.92,
+    metalness: 0.9,
+    clearcoat: 0.45,
+    clearcoatRoughness: 0.2,
   });
-  const bladeMat = new THREE.MeshStandardMaterial({
-    color: 0xe6edf5,
-    roughness: 0.1,
-    metalness: 0.96,
+  const chainmailMat = new THREE.MeshStandardMaterial({
+    color: 0x3b4252,
+    roughness: 0.44,
+    metalness: 0.82,
+  });
+  const hiltMat = new THREE.MeshPhysicalMaterial({
+    color: 0xd9a23b,
+    roughness: 0.2,
+    metalness: 0.94,
+    clearcoat: 0.35,
+  });
+  const bladeMat = new THREE.MeshPhysicalMaterial({
+    color: 0xeaf2fa,
+    emissive: 0x1e293b,
+    emissiveIntensity: 0.08,
+    roughness: 0.09,
+    metalness: 0.98,
+    clearcoat: 0.55,
+    clearcoatRoughness: 0.12,
   });
   const capeMat = new THREE.MeshStandardMaterial({
     color: isPlayer ? 0x991b1b : team === 'enemy' ? 0x7f1d1d : 0x1e40af,
@@ -763,20 +793,114 @@ export function createDragonRig(
   capeMesh.castShadow = true;
   riderBodyGroup.add(capeMesh);
 
-  // Left Rein Hand
+  // Helper: Realistic Articulated Armored Hand with Palm, Knuckle Guard, 4 Segmented Fingers & Thumb
+  const buildArticulatedGauntletHand = (
+    parent: THREE.Group,
+    side: -1 | 1,
+    gripAngle: number,
+  ) => {
+    // Upper arm extending backward toward knight shoulder (no floating arms in 1st-person!)
+    const upperArm = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.105, 0.42, 6, 10),
+      chainmailMat,
+    );
+    upperArm.rotation.x = Math.PI / 2.9;
+    upperArm.rotation.z = side * -0.18;
+    upperArm.position.set(side * -0.08, 0.04, 0.52);
+    parent.add(upperArm);
+
+    const elbowCouter = new THREE.Mesh(
+      new THREE.SphereGeometry(0.115, 10, 8),
+      gauntletMat,
+    );
+    elbowCouter.scale.set(1.05, 0.9, 1.2);
+    elbowCouter.position.set(side * -0.04, -0.09, 0.34);
+    parent.add(elbowCouter);
+
+    // Sculpted Tapered Plate Vambrace with Brass Trim Cuff & Rivets
+    const vambrace = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.088, 0.108, 0.48, 12),
+      gauntletMat,
+    );
+    vambrace.rotation.x = Math.PI / 2.25;
+    vambrace.position.set(0, -0.05, 0.09);
+    parent.add(vambrace);
+
+    const wristCuff = new THREE.Mesh(
+      new THREE.TorusGeometry(0.086, 0.018, 6, 14),
+      hiltMat,
+    );
+    wristCuff.position.set(0, -0.01, -0.12);
+    wristCuff.rotation.x = 0.25;
+    parent.add(wristCuff);
+
+    for (let s = 0; s < 2; s++) {
+      const strap = new THREE.Mesh(
+        new THREE.TorusGeometry(0.098, 0.014, 6, 12),
+        leatherMat,
+      );
+      strap.position.set(0, -0.05 - s * 0.02, 0.04 + s * 0.13);
+      strap.rotation.x = 0.2;
+      parent.add(strap);
+    }
+
+    // Articulated Gauntlet Hand Cluster
+    const handGroup = new THREE.Group();
+    handGroup.position.set(0, 0.01, -0.22);
+    handGroup.rotation.z = side * gripAngle;
+    parent.add(handGroup);
+
+    // Metacarpal Palm + Steel Dorsal Plate
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.115, 0.068, 0.13), leatherMat);
+    handGroup.add(palm);
+    const backPlate = new THREE.Mesh(new THREE.BoxGeometry(0.122, 0.032, 0.125), gauntletMat);
+    backPlate.position.set(0, 0.032, 0);
+    handGroup.add(backPlate);
+
+    const knuckleBar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.018, 0.018, 0.124, 8),
+      hiltMat,
+    );
+    knuckleBar.rotation.z = Math.PI / 2;
+    knuckleBar.position.set(0, 0.028, -0.062);
+    handGroup.add(knuckleBar);
+
+    // 4 Articulated 2-Phalanx Fingers curled firmly around rein or sword grip
+    for (let f = 0; f < 4; f++) {
+      const fx = (f - 1.5) * 0.028 * -side;
+      const prox = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.013, 0.042, 4, 6),
+        gauntletMat,
+      );
+      prox.position.set(fx, 0.008, -0.088);
+      prox.rotation.x = Math.PI / 2.8;
+      handGroup.add(prox);
+
+      const dist = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.011, 0.036, 4, 6),
+        leatherMat,
+      );
+      dist.position.set(fx, -0.028, -0.095);
+      dist.rotation.x = Math.PI / 1.45;
+      handGroup.add(dist);
+    }
+
+    // Opposable Armored Thumb locking across the grip
+    const thumb = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.015, 0.056, 4, 6),
+      gauntletMat,
+    );
+    thumb.position.set(side * -0.062, 0.015, -0.045);
+    thumb.rotation.set(0.75, side * -0.45, side * 0.55);
+    handGroup.add(thumb);
+  };
+
+  // Left Rein Arm & Articulated Gauntlet Hand gripping the leather rein
   const leftHandGroup = new THREE.Group();
   leftHandGroup.position.set(-0.62, 2.38, -0.92);
   leftHandGroup.visible = isPlayer;
   bodyGroup.add(leftHandGroup);
-
-  const lForearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.62, 6, 10), gauntletMat);
-  lForearm.rotation.x = Math.PI / 2.4;
-  lForearm.position.set(0, -0.08, 0.12);
-  leftHandGroup.add(lForearm);
-
-  const lFist = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 8), gauntletMat);
-  lFist.position.set(0, 0.02, -0.24);
-  leftHandGroup.add(lFist);
+  buildArticulatedGauntletHand(leftHandGroup, -1, 0.25);
 
   // Leather Reins connecting neck collar to rider hands
   const reinGeo = new THREE.CylinderGeometry(0.032, 0.032, 2.55, 6);
@@ -791,48 +915,61 @@ export function createDragonRig(
   rightReinStrap.visible = isPlayer;
   bodyGroup.add(rightReinStrap);
 
-  // Right Sword Arm & Beveled Forged Broadsword
+  // Right Sword Arm & Masterwork Damascus Knight Broadsword
   const swordArmGroup = new THREE.Group();
   swordArmGroup.position.set(0.88, 2.32, -0.92);
   swordArmGroup.visible = isPlayer;
   bodyGroup.add(swordArmGroup);
+  buildArticulatedGauntletHand(swordArmGroup, 1, -0.22);
 
-  const rForearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.64, 6, 10), gauntletMat);
-  rForearm.rotation.x = Math.PI / 2.5;
-  rForearm.position.set(0, -0.1, -0.05);
-  swordArmGroup.add(rForearm);
-
-  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.06, 0.42, 8), leatherMat);
-  grip.position.set(0, 0.06, -0.45);
+  // Ribbed Leather Grip + Ruby/Gold Counterweight Pommel
+  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.042, 0.36, 10), leatherMat);
+  grip.position.set(0, 0.04, -0.34);
   grip.rotation.x = Math.PI / 4;
   swordArmGroup.add(grip);
 
-  const crossguard = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.58, 8), hiltMat);
+  const swordPommel = new THREE.Mesh(new THREE.OctahedronGeometry(0.072, 1), hiltMat);
+  swordPommel.position.set(0, -0.09, -0.2);
+  swordArmGroup.add(swordPommel);
+
+  // Engraved Winged Crossguard
+  const crossguard = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.62, 10), hiltMat);
   crossguard.rotation.z = Math.PI / 2;
-  crossguard.position.set(0, 0.23, -0.6);
+  crossguard.position.set(0, 0.19, -0.49);
   swordArmGroup.add(crossguard);
 
+  const guardCenter = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.09, 0.09), hiltMat);
+  guardCenter.position.set(0, 0.19, -0.49);
+  swordArmGroup.add(guardCenter);
+
+  // Faceted Double-Edged Damascus Broadsword Blade with Central Fuller Groove
   const swordShape = new THREE.Shape();
-  swordShape.moveTo(-0.045, 0);
-  swordShape.lineTo(-0.038, 1.55);
-  swordShape.lineTo(0, 1.86);
-  swordShape.lineTo(0.038, 1.55);
-  swordShape.lineTo(0.045, 0);
+  swordShape.moveTo(-0.052, 0);
+  swordShape.lineTo(-0.044, 1.65);
+  swordShape.lineTo(0, 1.98);
+  swordShape.lineTo(0.044, 1.65);
+  swordShape.lineTo(0.052, 0);
   swordShape.closePath();
   const bladeGeo = new THREE.ExtrudeGeometry(swordShape, {
-    steps: 1,
-    depth: 0.018,
+    steps: 2,
+    depth: 0.02,
     bevelEnabled: true,
-    bevelThickness: 0.008,
-    bevelSize: 0.012,
+    bevelThickness: 0.012,
+    bevelSize: 0.014,
     bevelSegments: 2,
   });
-  bladeGeo.translate(0, 0, -0.009);
+  bladeGeo.translate(0, 0, -0.01);
   bladeGeo.computeVertexNormals();
   const blade = new THREE.Mesh(bladeGeo, bladeMat);
-  blade.position.set(0, 0.24, -0.62);
+  blade.position.set(0, 0.21, -0.51);
   blade.rotation.x = -Math.PI / 4;
+  blade.castShadow = true;
   swordArmGroup.add(blade);
+
+  const fuller = new THREE.Mesh(new THREE.BoxGeometry(0.022, 1.38, 0.046), gauntletMat);
+  fuller.position.set(0, 0.72, -1.02);
+  fuller.rotation.x = -Math.PI / 4;
+  swordArmGroup.add(fuller);
 
   // 4. Muscular S-Curved Articulated Neck & Layered Armor Scales
   const neckGroup = new THREE.Group();
@@ -1213,6 +1350,7 @@ export function createDragonRig(
     clawMat.dispose();
     leatherMat.dispose();
     gauntletMat.dispose();
+    chainmailMat.dispose();
     hiltMat.dispose();
     bladeMat.dispose();
     capeMat.dispose();
@@ -1246,6 +1384,7 @@ export function createDragonRig(
     swordArmGroup,
     leftReinStrap,
     rightReinStrap,
+    swordBladeMat: bladeMat,
     auraLight,
     setFrozen,
     dispose,

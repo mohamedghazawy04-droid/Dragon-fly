@@ -11,6 +11,142 @@ export type GamePhase =
 export type WeatherState = 'clear' | 'rain' | 'storm';
 export type WeatherMode = 'auto' | WeatherState;
 export type CameraView = 'full' | 'rider';
+export type WarTargetType = 'dragons' | 'ships' | 'both';
+export type WarStatus = 'idle' | 'active' | 'victory' | 'defeat';
+export type KnightUpgradeKey = 'sword' | 'armor' | 'spirit';
+export type DragonUpgradeKey = 'breath' | 'scales' | 'wings';
+
+export const UPGRADE_MAX_LEVEL = 5;
+
+export type LoreMood = 'fire' | 'storm' | 'steel' | 'forest' | 'stone' | 'royal';
+
+export interface LoreTale {
+  id: string;
+  chapterNumber: string;
+  titleAr: string;
+  eraAr: string;
+  durationLabelAr: string;
+  unlockSeconds: number;
+  mood: LoreMood;
+  segments: string[];
+}
+
+export const ANCIENT_LORE_TALES: LoreTale[] = [
+  {
+    id: 'pact_of_first_flame',
+    chapterNumber: '01',
+    titleAr: 'ميثاق النار الأولى',
+    eraAr: 'العصر الأول · كهف ملاذ الصخور',
+    durationLabelAr: '0:42',
+    unlockSeconds: 0,
+    mood: 'fire',
+    segments: [
+      'في فجر الممالك القديمة، لم تكن التنانين ترضخ لسلاسل ولا لأوامر الملوك.',
+      'اجتمع أول الفرسان في كهف ملاذ الصخور، وأقسم بالوفاء قبل أن يرفع سيفه.',
+      'حين تلامس كف الفارس حراشف التنين دون خوف، يتولد عهد لا يكسره الموت ولا العاصفة.',
+    ],
+  },
+  {
+    id: 'knights_of_ash_storm',
+    chapterNumber: '02',
+    titleAr: 'فرسان العاصفة والرماد',
+    eraAr: 'حروب الغيوم السوداء · الممرات الشمالية',
+    durationLabelAr: '0:48',
+    unlockSeconds: 45,
+    mood: 'storm',
+    segments: [
+      'عندما أطبق البرق على قمم الشمال، تعلم الفرسان إمالة أجنحة تنانينهم بزاوية قائمة للعبور بين الشقوق الضيقة.',
+      'كان الصقيع يجمّد الدروع في الأعالي، لكن زفير سَعِير وصَقِيع كانا يشقان قلب العاصفة.',
+      'ومن سقط في البحر يومها، لم يتركه تنينه قط، بل انقضّ من بين السحاب لينتشله من الأمواج.',
+    ],
+  },
+  {
+    id: 'epic_of_ghazzawi',
+    chapterNumber: '03',
+    titleAr: 'ملحمة غزاوي ونصل الدمشق',
+    eraAr: 'وقعة المضيق · أساطير السيوف',
+    durationLabelAr: '0:52',
+    unlockSeconds: 105,
+    mood: 'steel',
+    segments: [
+      'سُئل القائد غزاوي يوماً عن سر الصمود أمام أساطيل القراصنة وتنانين الرماد المتوحشة.',
+      'فأشهر سيفه الدمشقي المشحوذ بجمر التنين وقال كلمته التي تتوارثها الحامية: يجب أن نقص الرؤوس!',
+      'ومن ذلك اليوم، كلما اشتعل الشرر على أسوار القلعة أو خشب السفن، تردد صدى صيحته في السماء.',
+    ],
+  },
+  {
+    id: 'hanging_roost_trees',
+    chapterNumber: '04',
+    titleAr: 'سرّ أشجار المبيت المعلقة',
+    eraAr: 'غابات الغرب المنسية · زمن الهدنة',
+    durationLabelAr: '0:46',
+    unlockSeconds: 180,
+    mood: 'forest',
+    segments: [
+      'خارج أوقات النفير والحرب، تبحث التنانين البرية عن الأشجار الشاهقة المعلقة لتستريح مقلوبة كحراس الغابة.',
+      'هناك تصغي لخشخشة أوراق النخيل ونسيم المحيط، وتهدأ نيرانها المتقدة في صدورها.',
+      'ولا يجرؤ صياد على الاقتراب من تلك القمم، لأن يقظة تنين واحد كافية لإحراق أسطول كامل.',
+    ],
+  },
+  {
+    id: 'siege_of_falcon_castle',
+    chapterNumber: '05',
+    titleAr: 'حصار قلعة الصقر الأول',
+    eraAr: 'المملكة الوسطى · حرب الحصون',
+    durationLabelAr: '0:50',
+    unlockSeconds: 270,
+    mood: 'stone',
+    segments: [
+      'كانت أسوار قلعة الصقر تُعد منيعة، تحرسها الأبراج ورماة المجانيق ليل نهار.',
+      'حتى أطل جَلْمُود بصخوره المنصهرة واندفع الفرسان عبر السور المحطم، فتركوا ندوب اللهب والسيوف شاهدة على الحجارة.',
+      'منذ تلك المعركة، صار البوق الحربي يرن من جهة الهجوم قبل أن تلامس أقدام التنانين القمم.',
+    ],
+  },
+  {
+    id: 'testament_of_the_prince',
+    chapterNumber: '06',
+    titleAr: 'وصية الأمير وسيد التنانين',
+    eraAr: 'العهد الملكي · قصر المرجان',
+    durationLabelAr: '0:56',
+    unlockSeconds: 375,
+    mood: 'royal',
+    segments: [
+      'في قاعات قصر المرجان، سلم الأمير راية السماء إلى حرسه المخلصين وقال: لن ندافع عن الجدران فحسب، بل عن الأرواح.',
+      'كل نصر تكتسب به عزيمة الفارس وقوة التنين هو أمانة تزيد النصل مضاءً والحراشف صلابة.',
+      'فارتقِ بتنينك أيها الفارس، واجعل نداءك في الأعالي عهداً لا ينطفئ.',
+    ],
+  },
+];
+
+export interface ProgressionState {
+  knightPoints: number;
+  dragonPoints: number;
+  warsWon: number;
+  warWave: number;
+  knightUpgrades: Record<KnightUpgradeKey, number>;
+  dragonUpgrades: Record<DragonUpgradeKey, number>;
+  loreElapsedSeconds: number;
+  savedAt: number | null;
+}
+
+export const DEFAULT_PROGRESSION: ProgressionState = {
+  knightPoints: 1,
+  dragonPoints: 1,
+  warsWon: 0,
+  warWave: 1,
+  knightUpgrades: {
+    sword: 0,
+    armor: 0,
+    spirit: 0,
+  },
+  dragonUpgrades: {
+    breath: 0,
+    scales: 0,
+    wings: 0,
+  },
+  loreElapsedSeconds: 0,
+  savedAt: null,
+};
 
 export interface DragonSpec {
   id: DragonId;
@@ -177,6 +313,22 @@ export const WORLD_LANDMARKS: LandmarkInfo[] = [
     y: 32,
     z: 60,
   },
+  {
+    id: 'volcanic_archipelago',
+    nameAr: 'جزر البراكين الخفية',
+    subtitleAr: 'فوهات حمم وأبراج بازلتية خفية',
+    x: -1520,
+    y: 112,
+    z: -1500,
+  },
+  {
+    id: 'enchanted_forest',
+    nameAr: 'الغابات المسحورة',
+    subtitleAr: 'أشجار مضيئة ومزارات بلورية قديمة',
+    x: -1600,
+    y: 62,
+    z: 1220,
+  },
 ];
 
 export interface EnemyIndicator {
@@ -229,6 +381,19 @@ export interface HudState {
   knifeEdgeSide: -1 | 0 | 1;
   nearLandedDragon: boolean;
   isInWater: boolean;
+  warType: WarTargetType;
+  warTimeLeft: number;
+  warDuration: number;
+  warStatus: WarStatus;
+  warDragonsKilled: number;
+  warDragonsGoal: number;
+  warShipsSunk: number;
+  warShipsGoal: number;
+  progression: ProgressionState;
+  dangerAlertActive: boolean;
+  activeLoreTaleId: string | null;
+  activeLoreSegment: number;
+  isLorePlaying: boolean;
 }
 
 export type HudControlId = 'joystick' | 'attack' | 'elements' | 'actions' | 'vitals';

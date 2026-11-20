@@ -67,6 +67,7 @@ export interface DestructibleBuilding {
 
 export interface DestructibleTree {
   index: number;
+  kind?: 'palm' | 'enchanted';
   pos: THREE.Vector3;
   radius: number;
   height: number;
@@ -93,6 +94,7 @@ export interface WorldBuildResult {
   hangingRoostSpots: HangingRoostSpot[];
   palmTrunkInst: THREE.InstancedMesh | null;
   palmCrownInst: THREE.InstancedMesh | null;
+  hideTree: (tree: DestructibleTree) => void;
   banners: THREE.Mesh[];
   sanctuaryBeacon: THREE.Mesh;
   sanctuaryRing: THREE.Mesh;
@@ -111,8 +113,8 @@ export interface WorldBuildResult {
 }
 
 const _zeroMat = new THREE.Matrix4().makeScale(0, 0, 0);
-const TERRAIN_SIZE = 3800;
-const TERRAIN_SEGS = 224;
+const TERRAIN_SIZE = 5600;
+const TERRAIN_SEGS = 280;
 const TERRAIN_STRIDE = TERRAIN_SEGS + 1;
 const TERRAIN_HALF = TERRAIN_SIZE * 0.5;
 const TERRAIN_CELL = TERRAIN_SIZE / TERRAIN_SEGS;
@@ -234,7 +236,73 @@ function baseTerrainHeight(x: number, z: number): number {
     h = Math.max(h, spire - 8);
   }
 
-  // 9. Scattered Sea Stacks & Reef Islands across the wide ocean
+  // 9. Hidden Volcanic Archipelago (Northwest Outer Sea: -1520, -1500 & flanking volcanic isles)
+  const hiddenVolcDist = Math.hypot(x + 1520, z + 1500);
+  if (hiddenVolcDist < 350) {
+    const t = Math.max(0, 1 - hiddenVolcDist / 350);
+    let cone =
+      Math.pow(t, 1.2) * 168 +
+      Math.sin(x * 0.048) * Math.cos(z * 0.048) * 14 * t +
+      Math.sin(x * 0.11 + z * 0.09) * 6 * t;
+    // Deep caldera bowl + dramatic southeastern lava breach for thrilling fly-throughs
+    if (hiddenVolcDist < 66) {
+      cone -= (1 - hiddenVolcDist / 66) * 86;
+    } else {
+      const ang = Math.atan2(z + 1500, x + 1520);
+      if (Math.abs(ang - 0.78) < 0.34 && hiddenVolcDist < 220) {
+        cone -= 36 * (1 - Math.abs(ang - 0.78) / 0.34);
+      }
+    }
+    h = Math.max(h, cone - 6);
+  }
+
+  const basaltIsleDist = Math.hypot(x + 1840, z + 1240);
+  if (basaltIsleDist < 205) {
+    const t = Math.max(0, 1 - basaltIsleDist / 205);
+    const crag =
+      Math.pow(t, 1.25) * 98 +
+      Math.abs(Math.sin(x * 0.065) * Math.cos(z * 0.065)) * 24 * t;
+    h = Math.max(h, crag - 6);
+  }
+
+  const emberAtollDist = Math.hypot(x + 1230, z + 1780);
+  if (emberAtollDist < 195) {
+    const t = Math.max(0, 1 - emberAtollDist / 195);
+    let ring = Math.pow(t, 1.15) * 88 + Math.sin(x * 0.07 + z * 0.06) * 8 * t;
+    if (emberAtollDist < 48) {
+      ring -= (1 - emberAtollDist / 48) * 62;
+    }
+    h = Math.max(h, ring - 5);
+  }
+
+  // 10. Enchanted Ancient Forests Archipelago (Southwest Outer Sea: -1600, 1220 & misty groves)
+  const enchMainDist = Math.hypot(x + 1600, z - 1220);
+  if (enchMainDist < 370) {
+    const t = Math.max(0, 1 - enchMainDist / 370);
+    const undulation =
+      Math.sin(x * 0.018) * Math.cos(z * 0.018) * 11 +
+      Math.sin(x * 0.045 + z * 0.04) * 5;
+    // Gentle outer rim hills dipping to an open landing & walking glade at center
+    const centerBowl = enchMainDist < 85 ? (1 - enchMainDist / 85) * 14 : 0;
+    const fH = -4 + Math.pow(t, 0.95) * 56 + undulation * t - centerBowl;
+    h = Math.max(h, fH);
+  }
+
+  const enchWestIsle = Math.hypot(x + 1940, z - 920);
+  if (enchWestIsle < 195) {
+    const t = Math.max(0, 1 - enchWestIsle / 195);
+    const fH = -4 + Math.pow(t, 1.1) * 48 + Math.sin(x * 0.032) * Math.cos(z * 0.032) * 8 * t;
+    h = Math.max(h, fH);
+  }
+
+  const enchSouthGrove = Math.hypot(x + 1280, z - 1480);
+  if (enchSouthGrove < 200) {
+    const t = Math.max(0, 1 - enchSouthGrove / 200);
+    const fH = -4 + Math.pow(t, 1.05) * 44 + Math.sin(x * 0.028 + z * 0.03) * 7 * t;
+    h = Math.max(h, fH);
+  }
+
+  // 11. Scattered Sea Stacks & Outer Reef Islands across the expanded 5600m ocean
   h = Math.max(h, radialHill(x, z, -140, -240, 44, 58) - 5);
   h = Math.max(h, radialHill(x, z, 280, -140, 38, 48) - 5);
   h = Math.max(h, radialHill(x, z, -210, 310, 42, 44) - 5);
@@ -243,6 +311,10 @@ function baseTerrainHeight(x: number, z: number): number {
   h = Math.max(h, radialHill(x, z, 1180, -760, 74, 72) - 6);
   h = Math.max(h, radialHill(x, z, 360, 1080, 90, 64) - 6);
   h = Math.max(h, radialHill(x, z, -960, -820, 85, 88) - 6);
+  h = Math.max(h, radialHill(x, z, -1210, -1080, 68, 76) - 6);
+  h = Math.max(h, radialHill(x, z, -1180, 960, 64, 58) - 6);
+  h = Math.max(h, radialHill(x, z, 1480, 1180, 105, 82) - 6);
+  h = Math.max(h, radialHill(x, z, 1420, -1280, 95, 92) - 6);
 
   return h;
 }
@@ -1176,8 +1248,8 @@ export function buildDragonWorld(
   const terrainNormal = createTerrainNormalMap(maxAnisotropy);
   disposables.push(stoneTex, woodTex, sailTex, waterNormal, terrainNormal);
 
-  // 1. UE5 Atmospheric Sky Dome (wide 4200m radius for expanded open world)
-  const skyGeo = new THREE.SphereGeometry(4200, 40, 24);
+  // 1. UE5 Atmospheric Sky Dome (wide 6200m radius for expanded open world)
+  const skyGeo = new THREE.SphereGeometry(6200, 40, 24);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -1227,7 +1299,7 @@ export function buildDragonWorld(
   scene.add(skyDome);
   disposables.push(skyGeo, skyMat);
 
-  // 2. Vast 3800m Open-World Deformable Terrain Mesh (224x224 optimal density)
+  // 2. Vast 5600m Open-World Deformable Terrain Mesh (280x280 sharp spatial density)
   const terrainSize = TERRAIN_SIZE;
   const segments = TERRAIN_SEGS;
   const terrainGeo = new THREE.PlaneGeometry(terrainSize, terrainSize, segments, segments);
@@ -1243,6 +1315,11 @@ export function buildDragonWorld(
   const cRock = new THREE.Color(0x48413b);
   const cDarkRock = new THREE.Color(0x26211d);
   const cLavaRock = new THREE.Color(0x3a1c14);
+  const cObsidian = new THREE.Color(0x181316);
+  const cEmberRim = new THREE.Color(0x7c2d12);
+  const cEnchantedMoss = new THREE.Color(0x134e3a);
+  const cEnchantedGlade = new THREE.Color(0x272048);
+  const cEnchantedFern = new THREE.Color(0x0f766e);
   const cSnow = new THREE.Color(0xd5e3f0);
   const tmpColor = new THREE.Color();
 
@@ -1254,10 +1331,33 @@ export function buildDragonWorld(
     posAttr.setY(i, y);
 
     const nearVolcano = Math.hypot(x - 940, z - 90) < 260;
+    const nearHiddenVolc =
+      Math.hypot(x + 1520, z + 1500) < 350 ||
+      Math.hypot(x + 1840, z + 1240) < 205 ||
+      Math.hypot(x + 1230, z + 1780) < 195;
+    const nearEnchanted =
+      Math.hypot(x + 1600, z - 1220) < 370 ||
+      Math.hypot(x + 1940, z - 920) < 195 ||
+      Math.hypot(x + 1280, z - 1480) < 200;
     const nearFrost = Math.hypot(x - 120, z + 940) < 310;
 
     if (nearFrost && y > 4) {
       tmpColor.copy(cDarkRock).lerp(cSnow, Math.min(1, 0.35 + y / 85));
+    } else if (nearHiddenVolc && y > 1) {
+      const craterDist = Math.hypot(x + 1520, z + 1500);
+      const atollDist = Math.hypot(x + 1230, z + 1780);
+      if (craterDist < 76 || atollDist < 54) {
+        tmpColor.copy(cEmberRim).lerp(cObsidian, 0.35);
+      } else {
+        tmpColor.copy(cObsidian).lerp(cLavaRock, Math.min(1, 0.25 + y / 130));
+      }
+    } else if (nearEnchanted && y > 2.2) {
+      const gladeDist = Math.hypot(x + 1600, z - 1220);
+      if (gladeDist < 105) {
+        tmpColor.copy(cEnchantedGlade).lerp(cEnchantedFern, gladeDist / 105);
+      } else {
+        tmpColor.copy(cEnchantedMoss).lerp(cEnchantedFern, Math.min(1, (y - 8) / 42));
+      }
     } else if (nearVolcano && y > 8) {
       tmpColor.copy(cLavaRock).lerp(cDarkRock, Math.min(1, y / 120));
     } else if (y < 4.8) {
@@ -1369,25 +1469,41 @@ export function buildDragonWorld(
   scene.add(terrainMesh);
   disposables.push(terrainGeo, terrainMat);
 
-  // Glowing Lava Pool inside Volcanic Caldera (940, 90)
+  // Glowing Lava Pools inside Eastern Volcano & Hidden Volcanic Archipelago Calderas
   const lavaGeo = new THREE.CircleGeometry(42, 24);
   lavaGeo.rotateX(-Math.PI / 2);
   const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a00 });
   const lavaPool = new THREE.Mesh(lavaGeo, lavaMat);
   lavaPool.position.set(940, 74, 90);
   scene.add(lavaPool);
-  disposables.push(lavaGeo, lavaMat);
 
-  // 3. Real Sky-Reflecting Physical Ocean (8200m wide) + CubeCamera Reflection
+  const hiddenLavaPoolGeo = new THREE.CircleGeometry(52, 24);
+  hiddenLavaPoolGeo.rotateX(-Math.PI / 2);
+  const hiddenLavaPool = new THREE.Mesh(hiddenLavaPoolGeo, lavaMat);
+  hiddenLavaPool.position.set(-1520, 78, -1500);
+  scene.add(hiddenLavaPool);
+
+  const atollLavaPoolGeo = new THREE.CircleGeometry(36, 20);
+  atollLavaPoolGeo.rotateX(-Math.PI / 2);
+  const atollLavaPool = new THREE.Mesh(atollLavaPoolGeo, lavaMat);
+  atollLavaPool.position.set(-1230, 22, -1780);
+  scene.add(atollLavaPool);
+
+  const volcanicGlow = new THREE.PointLight(0xff5500, 32, 240, 1.4);
+  volcanicGlow.position.set(-1520, 96, -1500);
+  scene.add(volcanicGlow);
+  disposables.push(lavaGeo, lavaMat, hiddenLavaPoolGeo, atollLavaPoolGeo);
+
+  // 3. Real Sky-Reflecting Physical Ocean (11600m wide) + CubeCamera Reflection
   const oceanRenderTarget = new THREE.WebGLCubeRenderTarget(256, {
     generateMipmaps: true,
     minFilter: THREE.LinearMipmapLinearFilter,
   });
-  const oceanCubeCamera = new THREE.CubeCamera(1, 4600, oceanRenderTarget);
+  const oceanCubeCamera = new THREE.CubeCamera(1, 6600, oceanRenderTarget);
   oceanCubeCamera.position.set(0, 18, 0);
   scene.add(oceanCubeCamera);
 
-  const oceanGeo = new THREE.PlaneGeometry(8200, 8200, 160, 160);
+  const oceanGeo = new THREE.PlaneGeometry(11600, 11600, 180, 180);
   oceanGeo.rotateX(-Math.PI / 2);
 
   const oceanMaterial = new THREE.MeshPhysicalMaterial({
@@ -1535,6 +1651,11 @@ export function buildDragonWorld(
     { cx: -480, cz: -492, yaw: 0.12, baseY: 34 },
     { cx: -484, cz: -618, yaw: -0.14, baseY: 36 },
     { cx: 650, cz: -305, yaw: 0.65, baseY: 2 },
+    // Hidden Volcanic Archipelago twin basalt needle straits
+    { cx: -1680, cz: -1370, yaw: 0.72, baseY: 4 },
+    { cx: -1380, cz: -1630, yaw: -0.55, baseY: 6 },
+    // Enchanted Ancient Forest crystal-monolith fly-through gate
+    { cx: -1455, cz: 1345, yaw: 0.42, baseY: 22 },
   ];
   for (const ng of needleGates) {
     const cosY = Math.cos(ng.yaw);
@@ -2016,6 +2137,9 @@ export function buildDragonWorld(
     { x: -565, z: 505, yaw: 0.6 },
     { x: 640, z: 495, yaw: -1.2 },
     { x: -410, z: -435, yaw: 0.3 },
+    { x: -1650, z: 1120, yaw: 0.9 },
+    { x: -1525, z: 1290, yaw: -1.1 },
+    { x: -1910, z: 915, yaw: 0.4 },
   ];
   roostTreeSpecs.forEach((spec) => {
     const ry = getTerrainHeight(spec.x, spec.z);
@@ -2029,7 +2153,7 @@ export function buildDragonWorld(
     hangingRoostSpots.push({ pos: worldPerch, yaw: spec.yaw });
   });
 
-  // 8. Palm Trees along Golden Beach (720, 560) — Destructible InstancedMesh
+  // 8. Palm Trees along Golden Beach (720, 560) & Ancient Glowing Trees in Enchanted Forests — Destructible InstancedMeshes
   const palmPositions: { x: number; y: number; z: number; scale: number; rot: number }[] = [];
   for (let i = 0; i < 64; i++) {
     const angle = (i / 64) * Math.PI * 2;
@@ -2076,6 +2200,7 @@ export function buildDragonWorld(
       palmCrownInst!.setMatrixAt(idx, dummy.matrix);
       destructibleTrees.push({
         index: idx,
+        kind: 'palm',
         pos: new THREE.Vector3(p.x, p.y, p.z),
         radius: 4.5 * p.scale,
         height: 15.5 * p.scale,
@@ -2091,20 +2216,226 @@ export function buildDragonWorld(
     disposables.push(trunkGeo, trunkMat, crownGeo, crownMat);
   }
 
-  // Instanced Boulders across cliffs, beaches, volcanic slopes, and chasms
+  // 8b. Enchanted Ancient Forest Bioluminescent Trees, Crystal Shrines & Glowing Mushroom Groves (-1600, 1220)
+  const enchantedCenters = [
+    { cx: -1600, cz: 1220, minR: 72, maxR: 310, count: 68 },
+    { cx: -1940, cz: 920, minR: 25, maxR: 155, count: 24 },
+    { cx: -1280, cz: 1480, minR: 25, maxR: 165, count: 24 },
+  ];
+  const enchTreePositions: { x: number; y: number; z: number; scale: number; rot: number }[] = [];
+  for (const ec of enchantedCenters) {
+    for (let i = 0; i < ec.count; i++) {
+      const angle = i * 2.39996 + ec.cx * 0.01;
+      const dist = ec.minR + (((i * 67) % 100) / 100) * (ec.maxR - ec.minR);
+      const px = ec.cx + Math.cos(angle) * dist;
+      const pz = ec.cz + Math.sin(angle) * dist;
+      const py = getTerrainHeight(px, pz);
+      if (py > 4.0 && py < 68) {
+        enchTreePositions.push({
+          x: px,
+          y: py,
+          z: pz,
+          scale: 1.05 + ((i * 19) % 45) / 100,
+          rot: i * 1.4,
+        });
+      }
+    }
+  }
+
+  let enchTrunkInst: THREE.InstancedMesh | null = null;
+  let enchCrownInst: THREE.InstancedMesh | null = null;
+  if (enchTreePositions.length > 0) {
+    const eTrunkGeo = new THREE.CylinderGeometry(0.85, 1.55, 19, 8);
+    eTrunkGeo.translate(0, 9.5, 0);
+    const eTrunkMat = new THREE.MeshStandardMaterial({
+      color: 0x3b2c42,
+      normalMap: terrainNormal,
+      roughness: 0.88,
+    });
+    enchTrunkInst = new THREE.InstancedMesh(eTrunkGeo, eTrunkMat, enchTreePositions.length);
+
+    // Double-layered bioluminescent ancient canopy
+    const lowerCanopy = new THREE.DodecahedronGeometry(6.8, 1);
+    lowerCanopy.scale(1.15, 0.65, 1.15);
+    lowerCanopy.translate(0, 19.5, 0);
+    const upperCanopy = new THREE.DodecahedronGeometry(4.8, 1);
+    upperCanopy.scale(1.0, 0.72, 1.0);
+    upperCanopy.translate(0, 24.5, 0);
+    const eCrownGeo = mergeGeometries([lowerCanopy, upperCanopy], false)!;
+    lowerCanopy.dispose();
+    upperCanopy.dispose();
+
+    const eCrownMat = new THREE.MeshStandardMaterial({
+      color: 0x0f766e,
+      emissive: 0x14b8a6,
+      emissiveIntensity: 0.34,
+      roughness: 0.68,
+    });
+    enchCrownInst = new THREE.InstancedMesh(eCrownGeo, eCrownMat, enchTreePositions.length);
+
+    const dummy = new THREE.Object3D();
+    enchTreePositions.forEach((p, idx) => {
+      dummy.position.set(p.x, p.y - 0.5, p.z);
+      dummy.rotation.set(0.04, p.rot, -0.04);
+      dummy.scale.setScalar(p.scale);
+      dummy.updateMatrix();
+      enchTrunkInst!.setMatrixAt(idx, dummy.matrix);
+      enchCrownInst!.setMatrixAt(idx, dummy.matrix);
+      destructibleTrees.push({
+        index: idx,
+        kind: 'enchanted',
+        pos: new THREE.Vector3(p.x, p.y, p.z),
+        radius: 6.2 * p.scale,
+        height: 25.0 * p.scale,
+        destroyed: false,
+      });
+    });
+    enchTrunkInst.computeBoundingSphere();
+    enchCrownInst.computeBoundingSphere();
+    enchTrunkInst.castShadow = true;
+    enchTrunkInst.receiveShadow = true;
+    enchCrownInst.castShadow = true;
+    scene.add(enchTrunkInst, enchCrownInst);
+    disposables.push(eTrunkGeo, eTrunkMat, eCrownGeo, eCrownMat);
+  }
+
+  // Bioluminescent Crystal Spires & Giant Glowing Mushrooms inside the Enchanted Glade (-1600, 1220)
+  const crystalSpireGeo = new THREE.OctahedronGeometry(2.6, 0);
+  crystalSpireGeo.scale(0.65, 2.5, 0.65);
+  const crystalSpireMat = new THREE.MeshStandardMaterial({
+    color: 0x5eead4,
+    emissive: 0x2dd4bf,
+    emissiveIntensity: 1.55,
+    roughness: 0.22,
+    metalness: 0.35,
+  });
+  const enchCrystalInst = new THREE.InstancedMesh(crystalSpireGeo, crystalSpireMat, 44);
+  const dummyC = new THREE.Object3D();
+  for (let i = 0; i < 44; i++) {
+    const ang = i * 2.39996;
+    const rad = 22 + (i % 11) * 20;
+    const cx = -1600 + Math.cos(ang) * rad;
+    const cz = 1220 + Math.sin(ang) * rad;
+    const cy = Math.max(4, getTerrainHeight(cx, cz));
+    dummyC.position.set(cx, cy + 2.2, cz);
+    dummyC.rotation.set((i % 3 - 1) * 0.22, ang, ((i + 1) % 3 - 1) * 0.2);
+    dummyC.scale.setScalar(0.65 + (i % 4) * 0.35);
+    dummyC.updateMatrix();
+    enchCrystalInst.setMatrixAt(i, dummyC.matrix);
+  }
+  enchCrystalInst.computeBoundingSphere();
+  scene.add(enchCrystalInst);
+
+  const gladeLight = new THREE.PointLight(0x2dd4bf, 28, 220, 1.4);
+  gladeLight.position.set(-1600, getTerrainHeight(-1600, 1220) + 18, 1220);
+  scene.add(gladeLight);
+  disposables.push(crystalSpireGeo, crystalSpireMat);
+
+  // Destructible Biome Shrines & Obsidian Fire Monoliths (for full collision & destruction physics in new biomes!)
+  const obsidianMat = new THREE.MeshStandardMaterial({
+    color: 0x1e191c,
+    map: stoneTex,
+    normalMap: terrainNormal,
+    roughness: 0.72,
+    metalness: 0.28,
+  });
+  const magmaCoreMat = new THREE.MeshStandardMaterial({
+    color: 0xff6b1a,
+    emissive: 0xff4500,
+    emissiveIntensity: 2.2,
+    roughness: 0.3,
+  });
+  disposables.push(obsidianMat, magmaCoreMat);
+
+  const shrineSpecs: {
+    id: string;
+    nameAr: string;
+    x: number;
+    z: number;
+    kind: 'volcanic' | 'enchanted';
+  }[] = [
+    { id: 'volc_shrine_1', nameAr: 'مسلة البازلت المشتعلة', x: -1615, z: -1385, kind: 'volcanic' },
+    { id: 'volc_shrine_2', nameAr: 'معبد الجمر الخفي', x: -1835, z: -1245, kind: 'volcanic' },
+    { id: 'volc_shrine_3', nameAr: 'برج الحمم القديم', x: -1240, z: -1725, kind: 'volcanic' },
+    { id: 'ench_arch_1', nameAr: 'بوابة الغابة المسحورة', x: -1565, z: 1185, kind: 'enchanted' },
+    { id: 'ench_arch_2', nameAr: 'مزار البلورات الخالد', x: -1640, z: 1265, kind: 'enchanted' },
+  ];
+  const shrineColGeo = new THREE.CylinderGeometry(3.2, 4.4, 34, 8);
+  const shrineCapGeo = new THREE.OctahedronGeometry(4.8, 0);
+  disposables.push(shrineColGeo, shrineCapGeo);
+
+  for (const sh of shrineSpecs) {
+    const sy = Math.max(4, getTerrainHeight(sh.x, sh.z));
+    const g = new THREE.Group();
+    g.position.set(sh.x, sy, sh.z);
+    const body = new THREE.Mesh(shrineColGeo, sh.kind === 'volcanic' ? obsidianMat : archMat);
+    body.position.y = 17;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    const cap = new THREE.Mesh(
+      shrineCapGeo,
+      sh.kind === 'volcanic' ? magmaCoreMat : crystalSpireMat,
+    );
+    cap.position.y = 37;
+    cap.castShadow = true;
+    g.add(body, cap);
+    scene.add(g);
+
+    destructibleBuildings.push({
+      id: sh.id,
+      nameAr: sh.nameAr,
+      mesh: g,
+      pos: new THREE.Vector3(sh.x, sy + 18, sh.z),
+      radius: 10,
+      height: 42,
+      hp: 85,
+      maxHp: 85,
+      destroyed: false,
+      colorHex: sh.kind === 'volcanic' ? 0x2a1f1d : 0x134e4a,
+      breakableParts: [cap],
+      brokenCount: 0,
+      baseMeshPos: g.position.clone(),
+      baseMeshRot: g.rotation.clone(),
+      scorchAmount: 0,
+    });
+  }
+
+  const hideTree = (t: DestructibleTree) => {
+    if (t.kind === 'enchanted') {
+      if (enchTrunkInst) {
+        enchTrunkInst.setMatrixAt(t.index, _zeroMat);
+        enchTrunkInst.instanceMatrix.needsUpdate = true;
+      }
+      if (enchCrownInst) {
+        enchCrownInst.setMatrixAt(t.index, _zeroMat);
+        enchCrownInst.instanceMatrix.needsUpdate = true;
+      }
+    } else {
+      if (palmTrunkInst) {
+        palmTrunkInst.setMatrixAt(t.index, _zeroMat);
+        palmTrunkInst.instanceMatrix.needsUpdate = true;
+      }
+      if (palmCrownInst) {
+        palmCrownInst.setMatrixAt(t.index, _zeroMat);
+        palmCrownInst.instanceMatrix.needsUpdate = true;
+      }
+    }
+  };
+
+  // Instanced Boulders across cliffs, beaches, volcanic slopes, enchanted glades, and chasms
   const boulderGeo = new THREE.DodecahedronGeometry(3.4, 1);
   const boulderMat = new THREE.MeshStandardMaterial({
     color: 0x5c534a,
     normalMap: terrainNormal,
     roughness: 0.9,
   });
-  const boulderCount = 96;
+  const boulderCount = 136;
   const boulderInst = new THREE.InstancedMesh(boulderGeo, boulderMat, boulderCount);
   const dummy = new THREE.Object3D();
   for (let i = 0; i < boulderCount; i++) {
-    const region = i % 5;
+    const region = i % 7;
     const baseAngle = (i * 2.39996) % (Math.PI * 2);
-    const rad = 55 + (i % 10) * 18;
+    const rad = 55 + (i % 10) * 20;
     const bx =
       region === 0
         ? -880 + Math.cos(baseAngle) * rad
@@ -2114,7 +2445,11 @@ export function buildDragonWorld(
             ? -480 + Math.cos(baseAngle) * (rad * 0.75)
             : region === 3
               ? 940 + Math.cos(baseAngle) * rad
-              : -640 + Math.cos(baseAngle) * (rad * 0.7);
+              : region === 4
+                ? -640 + Math.cos(baseAngle) * (rad * 0.7)
+                : region === 5
+                  ? -1520 + Math.cos(baseAngle) * (rad * 1.1)
+                  : -1600 + Math.cos(baseAngle) * (rad * 1.1);
     const bz =
       region === 0
         ? -60 + Math.sin(baseAngle) * rad
@@ -2124,7 +2459,11 @@ export function buildDragonWorld(
             ? -560 + Math.sin(baseAngle) * (rad * 0.9)
             : region === 3
               ? 90 + Math.sin(baseAngle) * rad
-              : 580 + Math.sin(baseAngle) * (rad * 0.7);
+              : region === 4
+                ? 580 + Math.sin(baseAngle) * (rad * 0.7)
+                : region === 5
+                  ? -1500 + Math.sin(baseAngle) * (rad * 1.1)
+                  : 1220 + Math.sin(baseAngle) * (rad * 1.1);
     const by = Math.max(-1, getTerrainHeight(bx, bz));
     dummy.position.set(bx, by, bz);
     dummy.rotation.set(i * 0.5, i * 1.1, i * 0.3);
@@ -2180,7 +2519,7 @@ export function buildDragonWorld(
   // 10. UE5 Volumetric-Lit Soft Atmospheric Cloud Banks (Single Instanced Draw Call + Scattering Shader)
   const cloudClusters: CloudCluster[] = [];
   const cloudTex = createVolumetricCloudTexture(maxAnisotropy);
-  const clusterCount = 68;
+  const clusterCount = 98;
   const puffsPerCluster = 10;
   const totalPuffs = clusterCount * puffsPerCluster;
 
@@ -2199,10 +2538,10 @@ export function buildDragonWorld(
   let puffIdx = 0;
   for (let i = 0; i < clusterCount; i++) {
     const angle = (i / clusterCount) * Math.PI * 2 + (i % 5) * 0.37;
-    const dist = 165 + ((i * 143) % 1380);
+    const dist = 165 + ((i * 197) % 2280);
     const cx = Math.cos(angle) * dist;
     const cz = Math.sin(angle) * dist;
-    const cy = 68 + ((i * 31) % 108);
+    const cy = 68 + ((i * 31) % 116);
     const clusterRadius = 42 + (i % 4) * 6;
 
     cloudClusters.push({
@@ -2351,7 +2690,7 @@ export function buildDragonWorld(
 
         // Smooth near-camera soft dissolve & horizon aerial fade
         float nearFade = smoothstep(8.0, 34.0, vViewDist);
-        float farFade = 1.0 - smoothstep(2300.0, 3900.0, vViewDist);
+        float farFade = 1.0 - smoothstep(3200.0, 5600.0, vViewDist);
         alpha *= nearFade * farFade;
 
         gl_FragColor = vec4(col, alpha);
@@ -2380,6 +2719,7 @@ export function buildDragonWorld(
     hangingRoostSpots,
     palmTrunkInst,
     palmCrownInst,
+    hideTree,
     banners: allBanners,
     sanctuaryBeacon,
     sanctuaryRing,

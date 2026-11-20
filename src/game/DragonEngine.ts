@@ -13,16 +13,28 @@ import {
   createFallingRiderMesh,
   DragonRig,
 } from './dragonMesh';
-import { createSoftParticleTexture } from './textures';
 import {
+  createImpactScarTexture,
+  createShockwaveRingTexture,
+  createSoftParticleTexture,
+} from './textures';
+import {
+  ANCIENT_LORE_TALES,
   CameraView,
+  DEFAULT_PROGRESSION,
   DRAGON_SPECS,
   DragonId,
+  DragonUpgradeKey,
   ElementType,
   EnemyIndicator,
   GameMode,
   GamePhase,
   HudState,
+  KnightUpgradeKey,
+  ProgressionState,
+  UPGRADE_MAX_LEVEL,
+  WarStatus,
+  WarTargetType,
   WeatherMode,
   WeatherState,
   WORLD_LANDMARKS,
@@ -58,7 +70,6 @@ const _qYaw = new THREE.Quaternion();
 const _qRoll = new THREE.Quaternion();
 const _finalQuat = new THREE.Quaternion();
 const _eulerA = new THREE.Euler(0, 0, 0, 'YXZ');
-const _zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
 
 // Pre-allocated scratch colors for zero-GC weather interpolation (Unreal Engine 5 filmic contrast)
 const _fogColorClear = new THREE.Color(0xc99c6e);
@@ -114,6 +125,81 @@ interface DebrisPiece {
   bounced: boolean;
   floating: boolean;
   burning: boolean;
+}
+
+interface SurfaceScar {
+  mesh: THREE.Mesh;
+  parent: THREE.Object3D;
+  life: number;
+  maxLife: number;
+  baseOpacity: number;
+}
+
+interface VfxSpark {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  life: number;
+  maxLife: number;
+}
+
+interface VfxShockRing {
+  mesh: THREE.Mesh;
+  life: number;
+  maxLife: number;
+  startScale: number;
+  endScale: number;
+}
+
+const PROGRESS_STORAGE_KEY = 'dragon_knight_progress_v1';
+
+function loadSavedProgression(): ProgressionState {
+  try {
+    const raw = window.localStorage.getItem(PROGRESS_STORAGE_KEY);
+    if (!raw) {
+      return {
+        ...DEFAULT_PROGRESSION,
+        knightUpgrades: { ...DEFAULT_PROGRESSION.knightUpgrades },
+        dragonUpgrades: { ...DEFAULT_PROGRESSION.dragonUpgrades },
+      };
+    }
+    const parsed = JSON.parse(raw) as Partial<ProgressionState>;
+    const clampLvl = (val: unknown) =>
+      typeof val === 'number' && Number.isFinite(val)
+        ? Math.max(0, Math.min(UPGRADE_MAX_LEVEL, Math.floor(val)))
+        : 0;
+    const clampInt = (val: unknown, fallback: number, minVal = 0) =>
+      typeof val === 'number' && Number.isFinite(val)
+        ? Math.max(minVal, Math.floor(val))
+        : fallback;
+
+    return {
+      knightPoints: clampInt(parsed.knightPoints, DEFAULT_PROGRESSION.knightPoints),
+      dragonPoints: clampInt(parsed.dragonPoints, DEFAULT_PROGRESSION.dragonPoints),
+      warsWon: clampInt(parsed.warsWon, 0),
+      warWave: clampInt(parsed.warWave, 1, 1),
+      knightUpgrades: {
+        sword: clampLvl(parsed.knightUpgrades?.sword),
+        armor: clampLvl(parsed.knightUpgrades?.armor),
+        spirit: clampLvl(parsed.knightUpgrades?.spirit),
+      },
+      dragonUpgrades: {
+        breath: clampLvl(parsed.dragonUpgrades?.breath),
+        scales: clampLvl(parsed.dragonUpgrades?.scales),
+        wings: clampLvl(parsed.dragonUpgrades?.wings),
+      },
+      loreElapsedSeconds: clampInt(parsed.loreElapsedSeconds, 0),
+      savedAt:
+        typeof parsed.savedAt === 'number' && Number.isFinite(parsed.savedAt)
+          ? parsed.savedAt
+          : null,
+    };
+  } catch {
+    return {
+      ...DEFAULT_PROGRESSION,
+      knightUpgrades: { ...DEFAULT_PROGRESSION.knightUpgrades },
+      dragonUpgrades: { ...DEFAULT_PROGRESSION.dragonUpgrades },
+    };
+  }
 }
 
 const UE5FilmicPostShader = {
@@ -235,6 +321,18 @@ export class DragonEngine {
   private companionOrbitAngle = 0;
   private landedDragonPos = new THREE.Vector3();
   private landedDragonYaw = 0;
+  private landedAnchorPos = new THREE.Vector3();
+  private landedMoveTarget = new THREE.Vector3();
+  private landedWalkPhase = 0;
+  private landedWalkBlend = 0;
+  private landedWalkTimer = 2.4;
+  private landedPauseTimer = 0;
+  private landedIsWalking = true;
+  private landedHeadYaw = 0;
+  private landedHeadPitch = 0;
+  private landedGroundPitch = 0;
+  private landedGroundRoll = 0;
+  private landedTurnRate = 0;
 
   private phase: GamePhase = 'sanctuary_bond';
   private mode: GameMode = 'combat';
@@ -248,6 +346,24 @@ export class DragonEngine {
   private woundsCount = 0;
   private allyScore = 0;
   private enemyScore = 0;
+
+  // Timed War & Upgrade Progression state
+  private warType: WarTargetType = 'both';
+  private warDuration = 120;
+  private warTimeLeft = 120;
+  private warStatus: WarStatus = 'idle';
+  private warDragonsKilled = 0;
+  private warDragonsGoal = 3;
+  private warShipsSunk = 0;
+  private warShipsGoal = 3;
+  private progression: ProgressionState = loadSavedProgression();
+  private dangerHornCooldown = 0;
+  private dangerAlertTimer = 0;
+  private shipFireCooldown = 2.5;
+  private activeLoreTaleId: string | null = null;
+  private activeLoreSegment = 0;
+  private isLorePlaying = false;
+  private loreAutosaveTimer = 0;
 
   // Boarding & Sword combat state
   private boardingTarget: AiDragon | null = null;
@@ -271,11 +387,19 @@ export class DragonEngine {
   private lastTouchX = 0;
   private lastTouchY = 0;
 
-  // Dynamic entities
+  // Dynamic entities & Advanced VFX Pools
   private aiDragons: AiDragon[] = [];
   private projectiles: Projectile[] = [];
   private particles: ParticleItem[] = [];
   private debris: DebrisPiece[] = [];
+  private surfaceScars: SurfaceScar[] = [];
+  private vfxSparks: VfxSpark[] = [];
+  private vfxShockRings: VfxShockRing[] = [];
+  private scarTex!: THREE.CanvasTexture;
+  private shockRingTex!: THREE.CanvasTexture;
+  private scarGeo = new THREE.PlaneGeometry(1, 1);
+  private sparkGeo = new THREE.BoxGeometry(0.14, 0.14, 0.95);
+  private shockRingGeo = new THREE.PlaneGeometry(1, 1);
   private trailSpawnTimer = 0;
   private hudEmitTimer = 0;
   private toastMessage: string | null = null;
@@ -288,6 +412,8 @@ export class DragonEngine {
   private rimLight: THREE.DirectionalLight;
   private oceanBounceLight: THREE.DirectionalLight;
   private dragonBreathLight: THREE.PointLight;
+  private vfxFlashLight: THREE.PointLight;
+  private vfxFlashPower = 0;
   private breathLightPower = 0;
   private breathLightColor = new THREE.Color(0xff6d1a);
   private lightningDirLight: THREE.DirectionalLight;
@@ -413,9 +539,9 @@ export class DragonEngine {
     // 3. Scene, Camera, Fog, Studio Environment (UE5 filmic contrast balance)
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xc99c6e);
-    this.scene.fog = new THREE.FogExp2(0xc99c6e, 0.00028);
+    this.scene.fog = new THREE.FogExp2(0xc99c6e, 0.00021);
 
-    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.4, 4800);
+    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.4, 6600);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     const skyEnvScene = new THREE.Scene();
@@ -490,9 +616,11 @@ export class DragonEngine {
     this.oceanBounceLight.position.set(0, -140, 0);
     this.scene.add(this.oceanBounceLight);
 
-    // Dynamic elemental breath light illuminating dragon snout, scales, and surroundings
+    // Dynamic elemental breath light & instantaneous VFX impact flash light
     this.dragonBreathLight = new THREE.PointLight(0xff6d1a, 0, 110, 1.25);
     this.scene.add(this.dragonBreathLight);
+    this.vfxFlashLight = new THREE.PointLight(0xffb84d, 0, 105, 1.35);
+    this.scene.add(this.vfxFlashLight);
 
     this.lightningDirLight = new THREE.DirectionalLight(0xc8ecff, 0);
     this.lightningDirLight.position.set(120, 260, -180);
@@ -508,6 +636,8 @@ export class DragonEngine {
 
     // 5. World & Textures
     this.particleTex = createSoftParticleTexture();
+    this.scarTex = createImpactScarTexture(this.maxAnisotropy);
+    this.shockRingTex = createShockwaveRingTexture();
     this.world = buildDragonWorld(this.scene, this.maxAnisotropy);
 
     // Capture initial Sky, Sun, Castles, and Mountains into Ocean Reflection CubeMap
@@ -519,6 +649,7 @@ export class DragonEngine {
     this.activeRiderRig = createArticulatedRiderRig();
     this.activeRiderRig.root.visible = false;
     this.scene.add(this.activeRiderRig.root);
+    this.applyUpgradeStats(true);
     this.placePlayerAtSanctuary();
 
     // 7. AI Dragons
@@ -613,6 +744,9 @@ export class DragonEngine {
     this.setFlightEuler(0, this.playerYaw);
     this.velocity.set(0, 0, 0);
     this.playerSpeed = 0;
+    this.playerRig.bodyGroup.position.set(0, 0, 0);
+    this.playerRig.bodyGroup.rotation.set(0, 0, 0);
+    this.playerRig.headGroup.rotation.set(0, 0, 0);
     this.playerRig.root.position.copy(this.playerPos);
     this.playerRig.root.rotation.set(0, this.playerYaw, 0, 'YXZ');
   }
@@ -724,7 +858,13 @@ export class DragonEngine {
       if (e.code === 'Digit1') this.setActiveElement('fire');
       if (e.code === 'Digit2') this.setActiveElement('ice');
       if (e.code === 'Digit3') this.setActiveElement('rock');
-      if (e.code === 'KeyF') this.tryBoardEnemy();
+      if (e.code === 'KeyF') {
+        if (this.findBoardableEnemy()) {
+          this.tryBoardEnemy();
+        } else {
+          this.performSwordSlash();
+        }
+      }
       if (e.code === 'KeyR') this.returnToSanctuary();
       if (e.code === 'KeyT') this.triggerRoar();
       if (e.code === 'KeyV') this.toggleCameraView();
@@ -744,8 +884,11 @@ export class DragonEngine {
       }
       if (e.code === 'KeyV') this.toggleCameraView();
     } else if (this.phase === 'on_foot') {
-      if (e.code === 'KeyG' || e.code === 'KeyF') {
+      if (e.code === 'KeyG') {
         this.remountDragon();
+      }
+      if (e.code === 'KeyF' || e.code === 'KeyJ') {
+        this.performSwordSlash();
       }
       if (e.code === 'KeyV') this.toggleCameraView();
       if (e.code === 'Space' && this.riderGrounded) {
@@ -886,6 +1029,10 @@ export class DragonEngine {
   public setMuted(muted: boolean): void {
     this.audio.init();
     this.audio.setMuted(muted);
+    if (muted && this.isLorePlaying) {
+      this.isLorePlaying = false;
+      this.emitHud();
+    }
   }
 
   public isMuted(): boolean {
@@ -898,16 +1045,13 @@ export class DragonEngine {
     this.dragonId = id;
     const spec = DRAGON_SPECS[id];
     this.activeElement = spec.element;
-    this.maxHp = spec.maxHp;
-    this.hp = spec.maxHp;
-    this.maxEnergy = spec.maxEnergy;
-    this.energy = spec.maxEnergy;
     this.bondLevel = 35;
 
     this.scene.remove(this.playerRig.root);
     this.playerRig.dispose();
     this.playerRig = createDragonRig(spec, this.maxAnisotropy, true);
     this.scene.add(this.playerRig.root);
+    this.applyUpgradeStats(true);
 
     if (this.phase === 'sanctuary_bond' || this.phase === 'resting') {
       this.placePlayerAtSanctuary();
@@ -922,8 +1066,177 @@ export class DragonEngine {
       for (const ai of this.aiDragons) {
         ai.roostState = 'flying';
       }
+      this.startNewWarWave(this.warType);
+    } else {
+      this.warStatus = 'idle';
+      this.emitHud();
+    }
+  }
+
+  public setWarType(warType: WarTargetType): void {
+    this.audio.init();
+    this.warType = warType;
+    if (this.mode === 'combat') {
+      this.startNewWarWave(warType);
+    } else {
+      this.emitHud();
+    }
+  }
+
+  public startNewWarWave(nextType?: WarTargetType): void {
+    this.audio.init();
+    if (nextType) {
+      this.warType = nextType;
+    }
+    const wave = this.progression.warWave;
+    const extra = Math.min(4, Math.floor((wave - 1) / 2));
+    this.warDuration = 120;
+    this.warTimeLeft = this.warDuration;
+    this.warDragonsKilled = 0;
+    this.warShipsSunk = 0;
+    this.warDragonsGoal =
+      this.warType === 'dragons' ? 3 + extra : this.warType === 'both' ? 2 + extra : 0;
+    this.warShipsGoal =
+      this.warType === 'ships' ? 3 + extra : this.warType === 'both' ? 2 + extra : 0;
+    this.warStatus = this.mode === 'combat' ? 'active' : 'idle';
+
+    // Restore pirate fleet cleanly for fresh ship / combined war rounds
+    if (this.warType === 'ships' || this.warType === 'both') {
+      for (const ship of this.world.pirateShips) {
+        ship.hp = ship.maxHp;
+        ship.destroyed = false;
+        ship.sinkProgress = 0;
+        ship.burnLevel = 0;
+        ship.burnTimer = 0;
+        ship.brokenMasts = 0;
+        ship.damageTiltX = 0;
+        ship.damageTiltZ = 0;
+        ship.fireLight.intensity = 0;
+        ship.hullMat.color.setHex(0x5c3c28);
+        ship.hullMat.emissiveIntensity = 0;
+        ship.sailMat.color.setHex(0xffffff);
+        ship.sailMat.emissiveIntensity = 0;
+        for (const mast of ship.masts) {
+          mast.rotation.set(0, 0, 0);
+        }
+        for (const sail of ship.sails) {
+          sail.scale.y = 1;
+        }
+        ship.group.position.y = 0;
+        ship.group.rotation.x = 0;
+        ship.group.rotation.z = 0;
+        ship.group.visible = true;
+      }
+    }
+
+    if (this.phase === 'flying') {
+      this.audio.speakKnight('combat_start');
     }
     this.emitHud();
+  }
+
+  public upgradeKnight(key: KnightUpgradeKey): void {
+    this.audio.init();
+    if (
+      this.progression.knightPoints <= 0 ||
+      this.progression.knightUpgrades[key] >= UPGRADE_MAX_LEVEL
+    ) {
+      return;
+    }
+    this.progression.knightPoints -= 1;
+    this.progression.knightUpgrades[key] += 1;
+    this.applyUpgradeStats(false);
+    this.saveProgression();
+    this.audio.playBondChime(0.85);
+    this.audio.speakKnight('battle_cry');
+    this.emitHud();
+  }
+
+  public upgradeDragon(key: DragonUpgradeKey): void {
+    this.audio.init();
+    if (
+      this.progression.dragonPoints <= 0 ||
+      this.progression.dragonUpgrades[key] >= UPGRADE_MAX_LEVEL
+    ) {
+      return;
+    }
+    this.progression.dragonPoints -= 1;
+    this.progression.dragonUpgrades[key] += 1;
+    this.applyUpgradeStats(false);
+    this.saveProgression();
+    this.audio.playBondChime(0.95);
+    this.audio.playRoar(this.activeElement);
+    this.emitHud();
+  }
+
+  public saveProgression(): void {
+    this.progression.savedAt = Date.now();
+    try {
+      window.localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(this.progression));
+    } catch {
+      // Ignore storage quota errors
+    }
+    this.emitHud();
+  }
+
+  public playLoreTale(taleId: string): void {
+    const tale = ANCIENT_LORE_TALES.find((t) => t.id === taleId);
+    if (!tale || this.progression.loreElapsedSeconds < tale.unlockSeconds) return;
+    this.audio.playLoreTale(tale, (activeId, segIdx, playing) => {
+      this.activeLoreTaleId = activeId;
+      this.activeLoreSegment = segIdx;
+      this.isLorePlaying = playing;
+      this.emitHud();
+    });
+  }
+
+  public stopLoreTale(): void {
+    this.audio.stopLoreTale();
+    this.isLorePlaying = false;
+    this.emitHud();
+  }
+
+  public resetProgression(): void {
+    this.stopLoreTale();
+    this.activeLoreTaleId = null;
+    this.activeLoreSegment = 0;
+    this.progression = {
+      ...DEFAULT_PROGRESSION,
+      knightUpgrades: { ...DEFAULT_PROGRESSION.knightUpgrades },
+      dragonUpgrades: { ...DEFAULT_PROGRESSION.dragonUpgrades },
+    };
+    try {
+      window.localStorage.removeItem(PROGRESS_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
+    this.applyUpgradeStats(true);
+    this.emitHud();
+  }
+
+  private applyUpgradeStats(refillVitals: boolean): void {
+    const spec = DRAGON_SPECS[this.dragonId];
+    const scalesLvl = this.progression.dragonUpgrades.scales;
+    const armorLvl = this.progression.knightUpgrades.armor;
+    const spiritLvl = this.progression.knightUpgrades.spirit;
+    const swordLvl = this.progression.knightUpgrades.sword;
+
+    const prevMaxHp = this.maxHp;
+    this.maxHp = spec.maxHp + scalesLvl * 24 + armorLvl * 14;
+    this.maxEnergy = spec.maxEnergy + spiritLvl * 16;
+    if (refillVitals) {
+      this.hp = this.maxHp;
+      this.energy = this.maxEnergy;
+    } else {
+      this.hp = Math.min(this.maxHp, this.hp + Math.max(0, this.maxHp - prevMaxHp));
+      this.energy = Math.min(this.maxEnergy, this.energy + 16);
+    }
+
+    // Visual Damascus steel & rune luminescence as sword upgrade level increases
+    if (this.playerRig?.swordBladeMat) {
+      this.playerRig.swordBladeMat.emissive.setHex(swordLvl > 0 ? 0xf59e0b : 0x1e293b);
+      this.playerRig.swordBladeMat.emissiveIntensity = 0.08 + swordLvl * 0.14;
+    }
   }
 
   public setActiveElement(el: ElementType): void {
@@ -976,6 +1289,7 @@ export class DragonEngine {
     this.audio.init();
     this.halfLoopRemaining = Math.PI;
     this.audio.playWingbeat();
+    this.audio.speakKnight('boost');
     this.emitHud();
   }
 
@@ -1073,11 +1387,14 @@ export class DragonEngine {
       this.landedDragonPos.y + 5.5,
       this.world.getWalkableGroundHeight(this.riderPos.x, this.riderPos.z) + 6.5,
     );
-    const near = this.riderPos.distanceTo(this.landedDragonPos) < 20;
+    const near = this.riderPos.distanceTo(this.landedDragonPos) < 28;
     const lx = near ? this.landedDragonPos.x : this.riderPos.x;
     const lz = near ? this.landedDragonPos.z : this.riderPos.z;
     const yaw = near ? this.landedDragonYaw : this.riderYaw;
 
+    this.playerRig.bodyGroup.position.set(0, 0, 0);
+    this.playerRig.bodyGroup.rotation.set(0, 0, 0);
+    this.playerRig.headGroup.rotation.set(0, 0, 0);
     this.playerPos.set(lx, launchY, lz);
     this.setFlightEuler(0.18, yaw);
     this.playerSpeed = spec.baseSpeed * 0.85;
@@ -1107,11 +1424,13 @@ export class DragonEngine {
     }
     this.audio.playWingbeat();
     this.audio.playRoar(this.activeElement);
+    this.audio.speakKnight('takeoff', true);
     this.emitHud();
   }
 
   public launchFlight(): void {
     this.audio.init();
+    this.stopLoreTale();
     if (this.bondLevel < 100) {
       this.bondLevel = 100;
     }
@@ -1124,10 +1443,15 @@ export class DragonEngine {
     // Launch directly out of the Sanctuary rock-cavern mouth facing the open ocean
     this.playerPos.set(-555, 76, 515);
     this.setFlightEuler(-0.02, -0.78);
-    this.playerSpeed = DRAGON_SPECS[this.dragonId].baseSpeed;
+    this.playerSpeed =
+      DRAGON_SPECS[this.dragonId].baseSpeed + this.progression.dragonUpgrades.wings * 6;
     _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
     this.velocity.copy(_forward).multiplyScalar(this.playerSpeed);
+    if (this.mode === 'combat' && this.warStatus !== 'active') {
+      this.startNewWarWave(this.warType);
+    }
     this.audio.playRoar(this.activeElement);
+    this.audio.speakKnight('takeoff', true);
     this.emitHud();
   }
 
@@ -1217,8 +1541,16 @@ export class DragonEngine {
     this.knifeEdgeSide = 0;
     this.landingRequested = false;
     this.activeRiderRig.root.visible = false;
+    this.playerRig.riderBodyGroup.visible = true;
+    this.playerRig.leftHandGroup.visible = true;
+    this.playerRig.swordArmGroup.visible = true;
+    this.playerRig.leftReinStrap.visible = true;
+    this.playerRig.rightReinStrap.visible = true;
+    this.playerRig.bodyGroup.position.set(0, 0, 0);
+    this.playerRig.bodyGroup.rotation.set(0, 0, 0);
+    this.playerRig.headGroup.rotation.set(0, 0, 0);
     this.phase = 'flying';
-    this.playerPos.set(lm.x + 95, Math.max(lm.y + 34, 40), lm.z + 95);
+    this.playerPos.set(lm.x + 95, Math.max(lm.y + 44, 52), lm.z + 95);
     this.setFlightEuler(-0.06, Math.atan2(this.playerPos.x - lm.x, this.playerPos.z - lm.z));
     this.playerSpeed = DRAGON_SPECS[this.dragonId].baseSpeed;
     _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
@@ -1280,44 +1612,142 @@ export class DragonEngine {
     this.isFiring = false;
     this.phase = 'boarding';
     this.audio.playWingbeat();
+    this.audio.speakKnight('battle_cry', true);
     this.emitHud();
   }
 
   public performSwordSlash(): void {
-    if (this.phase !== 'boarding' || !this.boardingTarget || this.boardingExitTimer > 0) return;
     if (this.swordSwingTimer > 0.12) return;
     this.audio.init();
-    this.swordSwingTimer = 0.36;
-    this.audio.playSwordSlash();
-    this.audio.playSwordHit();
-    this.boardingHits += 1;
+    const swordDmg = 42 + this.progression.knightUpgrades.sword * 18;
 
-    const tPos = this.boardingTarget.pos;
-    for (let i = 0; i < 14; i++) {
-      this.spawnParticle(
-        tPos.x + (Math.random() - 0.5) * 2,
-        tPos.y + 2.4,
-        tPos.z + (Math.random() - 0.5) * 2,
-        (Math.random() - 0.5) * 18,
-        4 + Math.random() * 12,
-        (Math.random() - 0.5) * 18,
-        0xfef08a,
-        0.55,
-        0.6,
-        2.6,
-        18,
-      );
+    if (this.phase === 'boarding' && this.boardingTarget && this.boardingExitTimer <= 0) {
+      this.swordSwingTimer = 0.36;
+      this.audio.playSwordSlash();
+      this.audio.playSwordSpark();
+      this.boardingHits += 1;
+
+      const tPos = this.boardingTarget.pos;
+      this.spawnSparkBurst(tPos.clone().setY(tPos.y + 2.2), _unitY, 20, 0xfef08a, 1.15);
+      this.spawnShockwaveRing(tPos.clone().setY(tPos.y + 2.0), _unitY, 0.8, 7.5, 0xfbbf24, 0.42);
+      this.triggerVfxFlash(tPos, 0xfde047, 1.0);
+
+      if (this.boardingHits >= this.boardingHitsRequired) {
+        this.killEnemyDragon(this.boardingTarget, true);
+        this.boardingExitTimer = 0.55;
+      } else {
+        this.audio.speakKnight('battle_cry');
+      }
+      this.emitHud();
+      return;
     }
 
-    if (this.boardingHits >= this.boardingHitsRequired) {
-      this.killEnemyDragon(this.boardingTarget, true);
-      this.boardingExitTimer = 0.55;
+    if (this.phase === 'flying' || this.phase === 'on_foot') {
+      this.swordSwingTimer = 0.38;
+      this.audio.playSwordSlash();
+      let struckAnything = false;
+
+      const origin = this.phase === 'on_foot' ? this.riderPos : this.playerPos;
+      if (this.phase === 'flying') {
+        _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
+      } else {
+        _forward.set(-Math.sin(this.riderYaw), 0, -Math.cos(this.riderYaw)).normalize();
+      }
+      const strikeCenter = _v3.copy(origin).addScaledVector(_forward, this.phase === 'flying' ? 8.5 : 3.2);
+      if (this.phase === 'on_foot') {
+        strikeCenter.y += 1.4;
+      }
+
+      // 1. Sword vs Enemy Dragons (in flight close strafe)
+      if (this.mode === 'combat' && this.phase === 'flying') {
+        for (const ai of this.aiDragons) {
+          if (!ai.alive || ai.team !== 'enemy') continue;
+          if (ai.pos.distanceTo(strikeCenter) < 19) {
+            struckAnything = true;
+            ai.hp -= swordDmg;
+            _normal.copy(origin).sub(ai.pos).normalize();
+            this.spawnSparkBurst(ai.pos, _normal, 22, 0xffd166, 1.25);
+            this.spawnShockwaveRing(ai.pos, _normal, 0.8, 9.0, 0xfbbf24, 0.42);
+            this.triggerVfxFlash(ai.pos, 0xffd166, 1.1);
+            if (ai.hp <= 0) {
+              this.killEnemyDragon(ai, true);
+            }
+            break;
+          }
+        }
+      }
+
+      // 2. Sword vs Castles, Walls, Towers & Royal Palace (sparks + deep stone gouge scratches!)
+      const bReach = this.phase === 'flying' ? 14 : 6.2;
+      for (const b of this.world.destructibleBuildings) {
+        if (b.destroyed) continue;
+        const dx = strikeCenter.x - b.pos.x;
+        const dz = strikeCenter.z - b.pos.z;
+        const distHoriz = Math.hypot(dx, dz);
+        if (
+          distHoriz < b.radius + bReach &&
+          strikeCenter.y >= b.pos.y - b.height * 0.5 &&
+          strikeCenter.y <= b.pos.y + b.height * 0.65
+        ) {
+          struckAnything = true;
+          const invD = distHoriz > 0.01 ? 1 / distHoriz : 1;
+          const nx = distHoriz > 0.01 ? dx * invD : 0;
+          const nz = distHoriz > 0.01 ? dz * invD : 1;
+          const hitNormal = new THREE.Vector3(nx, 0.14, nz).normalize();
+          const hitPt = new THREE.Vector3(
+            b.pos.x + nx * (b.radius * 0.92),
+            THREE.MathUtils.clamp(strikeCenter.y, b.pos.y - b.height * 0.35, b.pos.y + b.height * 0.42),
+            b.pos.z + nz * (b.radius * 0.92),
+          );
+          this.spawnSurfaceScar(hitPt, hitNormal, this.phase === 'flying' ? 4.4 : 2.2, 'sword');
+          this.spawnSparkBurst(hitPt, hitNormal, 24, 0xffd86b, 1.25);
+          this.spawnShockwaveRing(hitPt, hitNormal, 0.5, 4.8, 0xffb74d, 0.35);
+          this.triggerVfxFlash(hitPt, 0xffcf54, 1.15);
+          this.damageBuilding(b, swordDmg * 0.65, true, _forward, 'ram');
+          break;
+        }
+      }
+
+      // 3. Sword vs Pirate Ships (hull scratches + timber & steel sparks!)
+      const sReach = this.phase === 'flying' ? 20 : 14;
+      for (const ship of this.world.pirateShips) {
+        if (ship.destroyed) continue;
+        const sp = ship.group.position;
+        const dx = strikeCenter.x - sp.x;
+        const dz = strikeCenter.z - sp.z;
+        const dH = Math.hypot(dx, dz);
+        if (dH < sReach && strikeCenter.y < 24) {
+          struckAnything = true;
+          const nx = dH > 0.01 ? dx / dH : 0;
+          const nz = dH > 0.01 ? dz / dH : 1;
+          const hitNormal = new THREE.Vector3(nx, 0.32, nz).normalize();
+          const hitPt = new THREE.Vector3(
+            sp.x + nx * Math.min(dH * 0.55, 6.5),
+            Math.max(2.4, strikeCenter.y),
+            sp.z + nz * Math.min(dH * 0.55, 6.5),
+          );
+          this.spawnSurfaceScar(hitPt, hitNormal, 3.6, 'sword', ship.group);
+          this.spawnSparkBurst(hitPt, hitNormal, 22, 0xffd166, 1.18);
+          this.spawnShockwaveRing(hitPt, hitNormal, 0.5, 5.2, 0xffa726, 0.38);
+          this.triggerVfxFlash(hitPt, 0xffca3a, 1.05);
+          this.damageShip(ship, swordDmg * 0.85, 'ram', _forward);
+          break;
+        }
+      }
+
+      if (struckAnything) {
+        this.audio.playSwordSpark();
+        this.impactShake = Math.max(this.impactShake, 0.36);
+        this.audio.speakKnight('battle_cry', true);
+      } else if (Math.random() < 0.45) {
+        this.audio.speakKnight('battle_cry');
+      }
+      this.emitHud();
     }
-    this.emitHud();
   }
 
   private findBoardableEnemy(): AiDragon | null {
-    if (this.mode !== 'combat') return null;
+    if (this.mode !== 'combat' || this.warType === 'ships') return null;
     let best: AiDragon | null = null;
     let bestDist = 42;
     for (const ai of this.aiDragons) {
@@ -1375,9 +1805,17 @@ export class DragonEngine {
     if (ai.team === 'enemy') {
       this.allyScore += bySword ? 300 : 150;
       this.energy = Math.min(this.maxEnergy, this.energy + (bySword ? 30 : 15));
+      this.audio.speakKnight(bySword ? 'sword_kill' : 'battle_cry', bySword);
+      if (this.mode === 'combat' && this.warStatus === 'active' && this.warType !== 'ships') {
+        this.warDragonsKilled += 1;
+        this.checkWarResolution();
+      }
     } else {
       this.enemyScore += 120;
     }
+
+    this.spawnSparkBurst(ai.pos, _unitY, 22, ai.team === 'enemy' ? 0xff9b38 : 0x7dd3fc, 1.3);
+    this.spawnShockwaveRing(ai.pos, _unitY, 1.2, 16, ai.team === 'enemy' ? 0xff7b1a : 0x38bdf8, 0.55);
 
     for (let i = 0; i < 20; i++) {
       this.spawnParticle(
@@ -1541,7 +1979,7 @@ export class DragonEngine {
       .lerp(_fogColorStorm, rainToStorm)
       .lerp(_fogColorFlash, flicker * 0.45);
     fog.density = THREE.MathUtils.lerp(
-      0.00028,
+      0.00021,
       THREE.MathUtils.lerp(0.0011, 0.0020, rainToStorm),
       clearToRain,
     );
@@ -1783,7 +2221,83 @@ export class DragonEngine {
     if (this.healBurstTimer > 0) this.healBurstTimer = Math.max(0, this.healBurstTimer - dt);
     if (this.fireCooldown > 0) this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     if (this.collisionCooldown > 0) this.collisionCooldown = Math.max(0, this.collisionCooldown - dt);
+    if (this.swordSwingTimer > 0) this.swordSwingTimer = Math.max(0, this.swordSwingTimer - dt);
+    if (this.dangerHornCooldown > 0) this.dangerHornCooldown = Math.max(0, this.dangerHornCooldown - dt);
+    if (this.dangerAlertTimer > 0) this.dangerAlertTimer = Math.max(0, this.dangerAlertTimer - dt);
     this.impactShake *= Math.exp(-8.5 * dt);
+
+    // Advance Sanctuary Ancient Lore unlock timer (2x rate while resting/bonding inside Sanctuary)
+    const maxLoreThreshold = ANCIENT_LORE_TALES[ANCIENT_LORE_TALES.length - 1].unlockSeconds;
+    if (this.progression.loreElapsedSeconds < maxLoreThreshold) {
+      const prevSecs = this.progression.loreElapsedSeconds;
+      const rate = this.phase === 'resting' || this.phase === 'sanctuary_bond' ? 2.0 : 1.0;
+      const nextSecs = Math.min(maxLoreThreshold, prevSecs + dt * rate);
+      this.progression.loreElapsedSeconds = nextSecs;
+
+      for (const tale of ANCIENT_LORE_TALES) {
+        if (prevSecs < tale.unlockSeconds && nextSecs >= tale.unlockSeconds) {
+          this.audio.playBondChime(0.8);
+          try {
+            window.localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(this.progression));
+          } catch {
+            // Ignore
+          }
+        }
+      }
+      this.loreAutosaveTimer += dt;
+      if (this.loreAutosaveTimer >= 12) {
+        this.loreAutosaveTimer = 0;
+        try {
+          window.localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(this.progression));
+        } catch {
+          // Ignore
+        }
+      }
+    }
+
+    // Timed War Countdown & Pirate Ship Defensive Artillery during Ship / Combined Wars
+    if (
+      this.mode === 'combat' &&
+      this.warStatus === 'active' &&
+      this.phase !== 'sanctuary_bond' &&
+      this.phase !== 'resting'
+    ) {
+      this.warTimeLeft = Math.max(0, this.warTimeLeft - dt);
+      if (this.warTimeLeft <= 0) {
+        this.resolveWarOnTimerEnd();
+      }
+      if (this.warType === 'ships' || this.warType === 'both') {
+        this.shipFireCooldown -= dt;
+        if (this.shipFireCooldown <= 0 && this.phase === 'flying') {
+          this.shipFireCooldown = 2.6 + Math.random() * 1.4;
+          for (const ship of this.world.pirateShips) {
+            if (ship.destroyed) continue;
+            const dShip = ship.group.position.distanceTo(this.playerPos);
+            if (dShip < 340) {
+              const mesh = new THREE.Mesh(this.fireGeo, this.fireMat);
+              mesh.position.copy(ship.group.position).setY(10.5);
+              this.scene.add(mesh);
+              _v2.copy(this.playerPos).sub(mesh.position).normalize();
+              this.projectiles.push({
+                mesh,
+                vel: _v2.clone().multiplyScalar(135),
+                element: 'fire',
+                ownerTeam: 'enemy',
+                life: 2.8,
+                damage: 8,
+                radius: 3.6,
+              });
+              this.triggerDirectionalDangerHorn(ship.group.position);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Decay instantaneous VFX flash light
+    this.vfxFlashPower = Math.max(0, this.vfxFlashPower - dt * 5.6);
+    this.vfxFlashLight.intensity = this.vfxFlashPower * 46;
 
     // Update dynamic elemental breath glow light
     this.breathLightPower = Math.max(0, this.breathLightPower - dt * 5.2);
@@ -1818,6 +2332,7 @@ export class DragonEngine {
     this.updateProjectiles(dt);
     this.updateParticles(dt);
     this.updateDebris(dt, elapsed);
+    this.updateVfx(dt);
 
     this.audio.updateAmbience(
       this.playerSpeed,
@@ -1996,12 +2511,13 @@ export class DragonEngine {
     const loopLift = this.halfLoopRemaining > 0 ? 18.0 : 0;
     this.velocity.addScaledVector(_up, (baseLift + loopLift) * dt);
 
-    // 3. Thrust along forward vector (climb bleeds speed naturally, dive accelerates via gravity!)
+    // Wing speed upgrade boosts flight thrust & agility!
+    const wingSpeedBonus = this.progression.dragonUpgrades.wings * 6.5;
     const thrustAccel = boosting
-      ? spec.baseSpeed * 1.18
+      ? (spec.baseSpeed + wingSpeedBonus) * 1.18
       : braking
-        ? spec.baseSpeed * 0.14
-        : spec.baseSpeed * 0.66;
+        ? (spec.baseSpeed + wingSpeedBonus) * 0.14
+        : (spec.baseSpeed + wingSpeedBonus) * 0.66;
     this.velocity.addScaledVector(_forward, thrustAccel * dt);
 
     // 4. Quadratic aerodynamic air resistance + rain drag
@@ -2022,10 +2538,10 @@ export class DragonEngine {
     // Integrate real world position
     this.playerPos.addScaledVector(this.velocity, dt);
 
-    // Soft aerodynamic windwall boundary at expanded open-world edge (1750m)
+    // Soft aerodynamic windwall boundary at expanded 5600m open-world edge (2550m radius)
     const distFromOrigin = Math.hypot(this.playerPos.x, this.playerPos.z);
-    if (distFromOrigin > 1750) {
-      const pull = (distFromOrigin - 1750) / 110;
+    if (distFromOrigin > 2550) {
+      const pull = (distFromOrigin - 2550) / 120;
       _v1.set(-this.playerPos.x, 0, -this.playerPos.z).normalize();
       this.velocity.addScaledVector(_v1, pull * 45 * dt);
       this.playerPos.x = THREE.MathUtils.lerp(this.playerPos.x, 0, pull * dt * 0.25);
@@ -2139,12 +2655,17 @@ export class DragonEngine {
     const walkableY = this.world.getWalkableGroundHeight(this.playerPos.x, this.playerPos.z);
     if (this.landingRequested) {
       if (walkableY < -0.2) {
-        // Guide gently toward closest walkable shore/palace if over open sea
+        // Guide gently toward closest walkable shore/biome if over open sea
         const shoreTargets = [
           [-640, 580],
           [820, -480],
           [-880, -60],
           [720, 560],
+          [940, 90],
+          [120, -940],
+          [-480, -560],
+          [-1520, -1500],
+          [-1600, 1220],
         ];
         let bestTarget = shoreTargets[0];
         let bestD = Infinity;
@@ -2325,17 +2846,19 @@ export class DragonEngine {
     );
     this.playerRig.rightReinStrap.rotation.y = -this.smoothedHandX * 0.14;
 
-    // Right Sword Hand leans & reacts with flight turn/attack
-    const fireLift = this.isFiring ? 0.16 : 0;
+    // Right Sword Hand: lifelike grip sway, turn lean, AND full sweeping 3D sword slash arc!
+    const fireLift = this.isFiring ? 0.14 : 0;
+    const slashProgress = this.swordSwingTimer > 0 ? 1 - this.swordSwingTimer / 0.38 : 0;
+    const slashArc = Math.sin(slashProgress * Math.PI);
     this.playerRig.swordArmGroup.position.set(
-      0.88 + this.smoothedHandX * 0.16,
-      2.3 + this.smoothedHandY * 0.12 + bob + fireLift,
-      -0.92 - fireLift * 0.5,
+      0.88 + this.smoothedHandX * 0.16 - slashArc * 0.68,
+      2.3 + this.smoothedHandY * 0.12 + bob + fireLift + slashArc * 0.28,
+      -0.92 - fireLift * 0.45 - slashArc * 0.56,
     );
     this.playerRig.swordArmGroup.rotation.set(
-      0.22 + this.smoothedHandY * 0.25 - fireLift,
-      0.1 - this.smoothedHandX * 0.25,
-      -0.35 - this.smoothedHandX * 0.35,
+      0.22 + this.smoothedHandY * 0.25 - fireLift - slashArc * 1.38,
+      0.1 - this.smoothedHandX * 0.25 + slashArc * 0.72,
+      -0.35 - this.smoothedHandX * 0.35 + slashArc * 1.15,
     );
 
     if (this.isFiring && this.energy > 1) {
@@ -2365,7 +2888,8 @@ export class DragonEngine {
       this.playerRig.tailSegments[i].rotation.x = Math.cos(elapsed * 3.8 - i * 0.5) * 0.05;
     }
 
-    this.energy = Math.min(this.maxEnergy, this.energy + dt * 7.8);
+    const energyRegen = 7.8 + this.progression.knightUpgrades.spirit * 2.2;
+    this.energy = Math.min(this.maxEnergy, this.energy + dt * energyRegen);
 
     if (this.isFiring) {
       this.fireElementalBreath();
@@ -2529,6 +3053,42 @@ export class DragonEngine {
     return { isSkimmingWater, isSlicingCloud };
   }
 
+  private pickNextDragonWalkTarget(): void {
+    const anchorX =
+      this.landedAnchorPos.distanceToSquared(this.riderPos) > 46 * 46
+        ? THREE.MathUtils.lerp(this.landedAnchorPos.x, this.riderPos.x, 0.55)
+        : this.landedAnchorPos.x;
+    const anchorZ =
+      this.landedAnchorPos.distanceToSquared(this.riderPos) > 46 * 46
+        ? THREE.MathUtils.lerp(this.landedAnchorPos.z, this.riderPos.z, 0.55)
+        : this.landedAnchorPos.z;
+
+    let chosenX = this.landedDragonPos.x;
+    let chosenZ = this.landedDragonPos.z;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 14 + Math.random() * 24;
+      const cx = anchorX + Math.cos(ang) * dist;
+      const cz = anchorZ + Math.sin(ang) * dist;
+      if (Math.hypot(cx - this.riderPos.x, cz - this.riderPos.z) < 9.5) continue;
+      const gy = this.world.getWalkableGroundHeight(cx, cz);
+      if (gy < 0.45) continue;
+      let blocked = false;
+      for (const b of this.world.destructibleBuildings) {
+        if (b.destroyed) continue;
+        if (Math.hypot(cx - b.pos.x, cz - b.pos.z) < b.radius + 5.5) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) continue;
+      chosenX = cx;
+      chosenZ = cz;
+      break;
+    }
+    this.landedMoveTarget.set(chosenX, 0, chosenZ);
+  }
+
   private completeDragonTouchdown(groundY: number): void {
     this.landingRequested = false;
     this.playerRoll = 0;
@@ -2537,7 +3097,21 @@ export class DragonEngine {
 
     _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
     this.landedDragonYaw = Math.atan2(-_forward.x, -_forward.z);
-    this.landedDragonPos.set(this.playerPos.x, groundY + 2.0, this.playerPos.z);
+    this.landedDragonPos.set(this.playerPos.x, groundY + 2.15, this.playerPos.z);
+    this.landedAnchorPos.copy(this.landedDragonPos);
+    this.landedWalkPhase = 0;
+    this.landedWalkBlend = 0;
+    this.landedIsWalking = false;
+    this.landedPauseTimer = 1.1;
+    this.landedWalkTimer = 3.2;
+    this.landedHeadYaw = 0;
+    this.landedHeadPitch = 0;
+    this.landedGroundPitch = 0;
+    this.landedGroundRoll = 0;
+    this.landedTurnRate = 0;
+    this.playerRig.bodyGroup.position.set(0, 0, 0);
+    this.playerRig.bodyGroup.rotation.set(0, 0, 0);
+    this.playerRig.headGroup.rotation.set(0, 0, 0);
 
     // Massive 360-degree wing-downdraft earth dust scatter + dirt/pebble debris
     for (let i = 0; i < 34; i++) {
@@ -2688,9 +3262,16 @@ export class DragonEngine {
         this.activeRiderRig.bodyPivot.rotation.set(0, 0, 0);
         const dLandX = this.riderPos.x - 14;
         const dLandZ = this.riderPos.z - 10;
-        const dLandY = Math.max(0, this.world.getWalkableGroundHeight(dLandX, dLandZ)) + 2.0;
+        const dLandY = Math.max(0, this.world.getWalkableGroundHeight(dLandX, dLandZ)) + 2.15;
         this.landedDragonPos.set(dLandX, dLandY, dLandZ);
         this.landedDragonYaw = Math.atan2(this.riderPos.x - dLandX, this.riderPos.z - dLandZ);
+        this.landedAnchorPos.copy(this.landedDragonPos);
+        this.landedWalkPhase = 0;
+        this.landedWalkBlend = 0;
+        this.landedIsWalking = false;
+        this.landedPauseTimer = 1.2;
+        this.landedWalkTimer = 3.0;
+        this.pickNextDragonWalkTarget();
         this.audio.playCrash('stone', false);
         for (let k = 0; k < 14; k++) {
           const ang = (k / 14) * Math.PI * 2;
@@ -2799,22 +3380,195 @@ export class DragonEngine {
   }
 
   private updateOnFootState(dt: number, elapsed: number): void {
-    // 1. Landed Dragon rests quietly with folded wings and gentle breathing
+    // 1. Landed Dragon stands upright on its hind feet and patrols naturally in all directions awaiting its knight
+    const distToRider = Math.hypot(
+      this.riderPos.x - this.landedDragonPos.x,
+      this.riderPos.z - this.landedDragonPos.z,
+    );
+
+    if (this.landedAnchorPos.distanceToSquared(this.riderPos) > 48 * 48) {
+      this.landedAnchorPos.lerp(this.riderPos, 1 - Math.exp(-0.8 * dt));
+    }
+
+    if (this.landedIsWalking) {
+      this.landedWalkTimer -= dt;
+      const toTargetX = this.landedMoveTarget.x - this.landedDragonPos.x;
+      const toTargetZ = this.landedMoveTarget.z - this.landedDragonPos.z;
+      const targetDist = Math.hypot(toTargetX, toTargetZ);
+
+      if (targetDist < 3.0 || this.landedWalkTimer <= 0 || distToRider < 6.5) {
+        this.landedIsWalking = false;
+        this.landedPauseTimer = 1.6 + Math.random() * 2.0;
+        this.landedTurnRate = 0;
+      } else {
+        const desiredYaw = Math.atan2(-toTargetX, -toTargetZ);
+        let yawDiff = desiredYaw - this.landedDragonYaw;
+        while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+        while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+
+        const maxTurn = 1.65 * dt;
+        const turnStep = THREE.MathUtils.clamp(yawDiff, -maxTurn, maxTurn);
+        this.landedDragonYaw += turnStep;
+        this.landedTurnRate = THREE.MathUtils.damp(
+          this.landedTurnRate,
+          THREE.MathUtils.clamp(yawDiff * 1.4, -1.2, 1.2),
+          6,
+          dt,
+        );
+
+        const moveDirX = -Math.sin(this.landedDragonYaw);
+        const moveDirZ = -Math.cos(this.landedDragonYaw);
+        const walkSpeed = 7.6 * Math.max(0.28, Math.cos(yawDiff));
+        const nx = this.landedDragonPos.x + moveDirX * walkSpeed * dt;
+        const nz = this.landedDragonPos.z + moveDirZ * walkSpeed * dt;
+        const nextGround = this.world.getWalkableGroundHeight(nx, nz);
+
+        let obstacleHit = nextGround < 0.45 || Math.hypot(nx - this.riderPos.x, nz - this.riderPos.z) < 6.8;
+        if (!obstacleHit) {
+          for (const b of this.world.destructibleBuildings) {
+            if (b.destroyed) continue;
+            if (Math.hypot(nx - b.pos.x, nz - b.pos.z) < b.radius + 4.8) {
+              obstacleHit = true;
+              break;
+            }
+          }
+        }
+        if (!obstacleHit) {
+          this.landedDragonPos.x = nx;
+          this.landedDragonPos.z = nz;
+        } else {
+          this.pickNextDragonWalkTarget();
+        }
+      }
+    } else {
+      this.landedTurnRate = THREE.MathUtils.damp(this.landedTurnRate, 0, 5, dt);
+      this.landedPauseTimer -= dt;
+      // Gently turn in place toward knight if knight moves well away while waiting
+      if (distToRider > 38) {
+        this.landedIsWalking = true;
+        this.landedWalkTimer = 3.6 + Math.random() * 1.8;
+        this.pickNextDragonWalkTarget();
+      } else if (this.landedPauseTimer <= 0) {
+        this.landedIsWalking = true;
+        this.landedWalkTimer = 2.8 + Math.random() * 2.8;
+        this.pickNextDragonWalkTarget();
+      }
+    }
+
+    const dragonGroundY = Math.max(
+      0,
+      this.world.getWalkableGroundHeight(this.landedDragonPos.x, this.landedDragonPos.z),
+    );
+    const fwdX = -Math.sin(this.landedDragonYaw);
+    const fwdZ = -Math.cos(this.landedDragonYaw);
+    const rgtX = Math.cos(this.landedDragonYaw);
+    const rgtZ = -Math.sin(this.landedDragonYaw);
+    const hFwd = this.world.getWalkableGroundHeight(
+      this.landedDragonPos.x + fwdX * 3.2,
+      this.landedDragonPos.z + fwdZ * 3.2,
+    );
+    const hBack = this.world.getWalkableGroundHeight(
+      this.landedDragonPos.x - fwdX * 3.2,
+      this.landedDragonPos.z - fwdZ * 3.2,
+    );
+    const hRgt = this.world.getWalkableGroundHeight(
+      this.landedDragonPos.x + rgtX * 2.6,
+      this.landedDragonPos.z + rgtZ * 2.6,
+    );
+    const hLft = this.world.getWalkableGroundHeight(
+      this.landedDragonPos.x - rgtX * 2.6,
+      this.landedDragonPos.z - rgtZ * 2.6,
+    );
+    const targetPitch = THREE.MathUtils.clamp(Math.atan2(hFwd - hBack, 6.4), -0.28, 0.28);
+    const targetRoll = THREE.MathUtils.clamp(Math.atan2(hLft - hRgt, 5.2), -0.22, 0.22);
+    this.landedGroundPitch = THREE.MathUtils.damp(this.landedGroundPitch, targetPitch, 5, dt);
+    this.landedGroundRoll = THREE.MathUtils.damp(this.landedGroundRoll, targetRoll, 5, dt);
+
+    this.landedWalkBlend = THREE.MathUtils.damp(
+      this.landedWalkBlend,
+      this.landedIsWalking ? 1 : 0,
+      5.5,
+      dt,
+    );
+    if (this.landedWalkBlend > 0.02) {
+      this.landedWalkPhase += dt * (4.8 * this.landedWalkBlend + 0.8);
+    }
+
+    const breathe = Math.sin(elapsed * 2.05);
+    const stride = Math.sin(this.landedWalkPhase) * 0.42 * this.landedWalkBlend;
+    const stepBounce = Math.abs(Math.sin(this.landedWalkPhase)) * 0.24 * this.landedWalkBlend;
+
+    // Upright standing height (2.15m above terrain places hind talons flush on earth)
+    this.landedDragonPos.y = dragonGroundY + 2.15 + stepBounce;
     this.playerPos.copy(this.landedDragonPos);
+
     this.playerRig.root.position.copy(this.landedDragonPos);
-    this.playerRig.root.rotation.set(0, this.landedDragonYaw, 0, 'YXZ');
-    const breathe = Math.sin(elapsed * 2.0);
-    this.playerRig.leftWingInner.rotation.z = -0.78 + breathe * 0.03;
-    this.playerRig.leftWingOuter.rotation.z = -0.92;
-    this.playerRig.rightWingInner.rotation.z = 0.78 - breathe * 0.03;
-    this.playerRig.rightWingOuter.rotation.z = 0.92;
-    this.playerRig.leftHindLeg.rotation.x = -0.68;
-    this.playerRig.rightHindLeg.rotation.x = -0.68;
-    this.playerRig.neckGroup.rotation.x = 0.05 * breathe;
-    this.playerRig.neckGroup.rotation.y = Math.sin(elapsed * 0.6) * 0.12;
-    this.playerRig.jawGroup.rotation.x = 0.04 + breathe * 0.02;
+    this.playerRig.root.rotation.set(
+      this.landedGroundPitch,
+      this.landedDragonYaw,
+      this.landedGroundRoll,
+      'YXZ',
+    );
+    this.playerRig.bodyGroup.position.set(0, breathe * 0.055, 0);
+    this.playerRig.bodyGroup.rotation.set(
+      Math.cos(this.landedWalkPhase * 2) * 0.028 * this.landedWalkBlend,
+      0,
+      Math.cos(this.landedWalkPhase) * 0.048 * this.landedWalkBlend - this.landedTurnRate * 0.08,
+    );
+
+    // Standing upright hind legs with alternating natural walking stride
+    this.playerRig.leftHindLeg.rotation.x = -0.18 + stride;
+    this.playerRig.rightHindLeg.rotation.x = -0.18 - stride;
+
+    // Wings: grounded folded stance with breathing expansion, gentle balance sway & occasional mantle flex
+    const wingMantle = Math.max(0, Math.sin(elapsed * 0.52)) * 0.14;
+    const wingWalkSway = Math.sin(this.landedWalkPhase) * 0.05 * this.landedWalkBlend;
+    this.playerRig.leftWingInner.rotation.z =
+      -0.62 + breathe * 0.04 + wingMantle + wingWalkSway - this.landedTurnRate * 0.07;
+    this.playerRig.leftWingOuter.rotation.z = -0.94 - wingMantle * 0.45 + breathe * 0.03;
+    this.playerRig.rightWingInner.rotation.z =
+      0.62 - breathe * 0.04 - wingMantle + wingWalkSway - this.landedTurnRate * 0.07;
+    this.playerRig.rightWingOuter.rotation.z = 0.94 + wingMantle * 0.45 - breathe * 0.03;
+
+    // Expressive Head & Neck: scans surroundings and keeps an attentive eye on the waiting knight
+    const riderAngleWorld = Math.atan2(
+      -(this.riderPos.x - this.landedDragonPos.x),
+      -(this.riderPos.z - this.landedDragonPos.z),
+    );
+    let relKnightYaw = riderAngleWorld - this.landedDragonYaw;
+    while (relKnightYaw > Math.PI) relKnightYaw -= Math.PI * 2;
+    while (relKnightYaw < -Math.PI) relKnightYaw += Math.PI * 2;
+    const knightGlanceWeight = this.landedIsWalking ? 0.22 : 0.65;
+    const scanSweep = Math.sin(elapsed * 0.85) * 0.34 + Math.sin(elapsed * 0.37) * 0.18;
+    const targetHeadYaw = THREE.MathUtils.clamp(
+      THREE.MathUtils.clamp(relKnightYaw, -0.75, 0.75) * knightGlanceWeight +
+        scanSweep * (1 - knightGlanceWeight * 0.5) +
+        this.landedTurnRate * 0.18,
+      -0.68,
+      0.68,
+    );
+    const targetHeadPitch =
+      0.06 * breathe -
+      Math.cos(this.landedWalkPhase * 2) * 0.048 * this.landedWalkBlend +
+      (this.landedIsWalking ? -0.04 : 0.08 * Math.sin(elapsed * 0.62));
+    this.landedHeadYaw = THREE.MathUtils.damp(this.landedHeadYaw, targetHeadYaw, 3.6, dt);
+    this.landedHeadPitch = THREE.MathUtils.damp(this.landedHeadPitch, targetHeadPitch, 4.2, dt);
+
+    this.playerRig.neckGroup.rotation.y = this.landedHeadYaw;
+    this.playerRig.neckGroup.rotation.x = this.landedHeadPitch;
+    this.playerRig.headGroup.rotation.y = this.landedHeadYaw * 0.25;
+    this.playerRig.headGroup.rotation.z =
+      Math.sin(elapsed * 0.7) * (this.landedIsWalking ? 0.04 : 0.11);
+    this.playerRig.jawGroup.rotation.x = 0.04 + (breathe + 1) * 0.025;
+
+    // Fluid sinuous tail S-wave compensating walking hips and turns
+    const tailFreq = 1.65 + this.landedWalkBlend * 2.1;
+    const tailAmp = 0.085 + this.landedWalkBlend * 0.065;
     for (let i = 0; i < this.playerRig.tailSegments.length; i++) {
-      this.playerRig.tailSegments[i].rotation.y = Math.sin(elapsed * 1.3 - i * 0.45) * 0.06;
+      this.playerRig.tailSegments[i].rotation.y =
+        Math.sin(elapsed * tailFreq - i * 0.52) * tailAmp - this.landedTurnRate * 0.06;
+      this.playerRig.tailSegments[i].rotation.x =
+        0.04 + Math.cos(elapsed * 1.4 - i * 0.4) * 0.035;
     }
 
     // 2. Knight On-Foot Locomotion (Joystick + WASD relative to camera yaw)
@@ -2828,7 +3582,7 @@ export class DragonEngine {
       this.manualSteerX;
 
     const sprinting = this.isBoosting || this.keys['ShiftLeft'] || this.keys['ShiftRight'];
-    const walkMax = sprinting ? 18.5 : 10.5;
+    const walkMax = (sprinting ? 18.5 : 10.5) + this.progression.knightUpgrades.spirit * 1.4;
     const mag = Math.hypot(moveFwd, moveStrafe);
     const sinY = Math.sin(this.riderYaw);
     const cosY = Math.cos(this.riderYaw);
@@ -2886,11 +3640,17 @@ export class DragonEngine {
     const horizSpeed = Math.hypot(this.riderVel.x, this.riderVel.z);
     this.playerSpeed = horizSpeed;
 
-    // Articulated walking / running limb gait
+    // Articulated walking / running limb gait + sword slash arc
     this.activeRiderRig.root.position.copy(this.riderPos);
-    const faceYaw = horizSpeed > 0.6 ? Math.atan2(-this.riderVel.x, -this.riderVel.z) : this.riderYaw;
+    const faceYaw =
+      this.cameraView === 'rider' || horizSpeed <= 0.6
+        ? this.riderYaw
+        : Math.atan2(-this.riderVel.x, -this.riderVel.z);
     this.activeRiderRig.root.rotation.set(0, faceYaw, 0, 'YXZ');
     this.activeRiderRig.bodyPivot.rotation.set(0, 0, 0);
+
+    const slashT = this.swordSwingTimer > 0 ? 1 - this.swordSwingTimer / 0.38 : 0;
+    const slashWave = Math.sin(slashT * Math.PI);
 
     if (horizSpeed > 0.5) {
       this.riderWalkCycle += dt * (sprinting ? 14 : 9.5);
@@ -2898,21 +3658,31 @@ export class DragonEngine {
       this.activeRiderRig.leftLeg.rotation.set(sw, 0, 0);
       this.activeRiderRig.rightLeg.rotation.set(-sw, 0, 0);
       this.activeRiderRig.leftArm.rotation.set(-sw * 0.85, 0, -0.08);
-      this.activeRiderRig.rightArm.rotation.set(sw * 0.85, 0, 0.08);
+      this.activeRiderRig.rightArm.rotation.set(
+        sw * 0.85 + slashWave * 1.65,
+        slashWave * 0.55,
+        0.08 - slashWave * 0.9,
+      );
       this.activeRiderRig.bodyPivot.position.y = Math.abs(Math.sin(this.riderWalkCycle)) * 0.09;
       this.activeRiderRig.cape.rotation.x = 0.35 + (sprinting ? 0.55 : 0.25) + Math.sin(elapsed * 10) * 0.08;
     } else {
       this.activeRiderRig.leftLeg.rotation.set(0, 0, 0);
       this.activeRiderRig.rightLeg.rotation.set(0, 0, 0);
       this.activeRiderRig.leftArm.rotation.set(0, 0, -0.06);
-      this.activeRiderRig.rightArm.rotation.set(0, 0, 0.06);
+      this.activeRiderRig.rightArm.rotation.set(
+        0.25 + slashWave * 1.75,
+        slashWave * 0.55,
+        0.06 - slashWave * 0.9,
+      );
       this.activeRiderRig.bodyPivot.position.y = 0;
       this.activeRiderRig.cape.rotation.x = 0.15 + Math.sin(elapsed * 2.2) * 0.04;
     }
 
-    // 3rd-Person Exploration Camera vs 1st-Person Explorer Eye Camera
+    // 3rd-Person Exploration Camera vs 1st-Person Explorer Eye Camera (with real visible sword arm!)
     if (this.cameraView === 'full') {
       this.activeRiderRig.root.visible = true;
+      this.activeRiderRig.head.visible = true;
+      this.activeRiderRig.cape.visible = true;
       const camDist = 7.6;
       _camTargetPos.set(
         this.riderPos.x + sinY * Math.cos(this.riderCamPitch) * camDist,
@@ -2926,11 +3696,17 @@ export class DragonEngine {
       _camLookAt.set(this.riderPos.x, this.riderPos.y + 1.9, this.riderPos.z);
       this.camera.lookAt(_camLookAt);
     } else {
-      this.activeRiderRig.root.visible = false;
-      this.camera.position.set(this.riderPos.x, this.riderPos.y + 2.15, this.riderPos.z);
+      this.activeRiderRig.root.visible = true;
+      this.activeRiderRig.head.visible = false;
+      this.activeRiderRig.cape.visible = false;
+      this.camera.position.set(
+        this.riderPos.x - sinY * 0.16,
+        this.riderPos.y + 2.02,
+        this.riderPos.z - cosY * 0.16,
+      );
       _camLookAt.set(
         this.riderPos.x - sinY * Math.cos(this.riderCamPitch) * 20,
-        this.riderPos.y + 2.15 + Math.sin(this.riderCamPitch) * 20,
+        this.riderPos.y + 2.02 + Math.sin(this.riderCamPitch) * 20,
         this.riderPos.z - cosY * Math.cos(this.riderCamPitch) * 20,
       );
       this.camera.up.copy(_unitY);
@@ -3122,6 +3898,9 @@ export class DragonEngine {
     _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
     _up.set(0, 1, 0).applyQuaternion(this.flightQuat).normalize();
 
+    const breathMul = 1 + this.progression.dragonUpgrades.breath * 0.24;
+    const breathRangeBonus = this.progression.dragonUpgrades.breath * 6;
+
     if (this.activeElement === 'fire') {
       // Continuous Scorching Dragon Flame Stream (overlapping additive plasma + fire cloud)
       this.breathLightPower = 1.0;
@@ -3161,7 +3940,7 @@ export class DragonEngine {
         false,
       );
 
-      this.applyContinuousConeBreath('fire', 78, 7.5, 5.5);
+      this.applyContinuousConeBreath('fire', 78 + breathRangeBonus, 7.5, 5.5 * breathMul);
     } else if (this.activeElement === 'ice') {
       // Continuous Billowing White Freezing Wind pouring out of mouth -> freezes enemies!
       this.breathLightPower = 0.95;
@@ -3188,7 +3967,7 @@ export class DragonEngine {
         );
       }
 
-      this.applyContinuousConeBreath('ice', 76, 8.5, 4.2);
+      this.applyContinuousConeBreath('ice', 76 + breathRangeBonus, 8.5, 4.2 * breathMul);
     } else {
       // Scattered Rock Barrage (7 tumbling jagged boulders in a spread cone)
       this.breathLightPower = 0.85;
@@ -3222,7 +4001,7 @@ export class DragonEngine {
           element: 'rock',
           ownerTeam: 'ally',
           life: 2.3,
-          damage: 14,
+          damage: 14 * breathMul,
           radius: 4.5,
         });
       }
@@ -3476,7 +4255,7 @@ export class DragonEngine {
         continue;
       }
 
-      if (this.mode === 'free' && ai.team === 'enemy') {
+      if ((this.mode === 'free' || this.warType === 'ships') && ai.team === 'enemy') {
         ai.rig.root.visible = false;
         continue;
       } else {
@@ -3667,6 +4446,11 @@ export class DragonEngine {
             damage: attackingKingdom ? 16 : 9,
             radius: 4.0,
           });
+
+          // Sound directional War Horn from the attacking enemy dragon's azimuth!
+          if (ai.team === 'enemy' && (targetPos === this.playerPos || attackingKingdom)) {
+            this.triggerDirectionalDangerHorn(ai.pos);
+          }
         }
       }
     }
@@ -3839,8 +4623,10 @@ export class DragonEngine {
         }
         if (!hit && this.phase === 'flying' && !this.playerCrashing) {
           if (p.mesh.position.distanceTo(this.playerPos) < p.radius + 4.2) {
-            this.hp = Math.max(0, this.hp - p.damage);
+            const armorMul = Math.max(0.45, 1 - this.progression.knightUpgrades.armor * 0.1);
+            this.hp = Math.max(0, this.hp - p.damage * armorMul);
             this.woundsCount = Math.min(5, this.woundsCount + 1);
+            this.triggerDirectionalDangerHorn(p.mesh.position);
             hit = true;
             if (this.hp <= 0) {
               this.playerCrashing = true;
@@ -3953,11 +4739,14 @@ export class DragonEngine {
 
   private computeZoneName(): string {
     let closestName = 'فوق البحر المفتوح';
-    let bestD = 175;
+    let bestScore = 1;
     for (const lm of WORLD_LANDMARKS) {
+      const zoneRadius =
+        lm.id === 'volcanic_archipelago' || lm.id === 'enchanted_forest' ? 320 : 185;
       const d = Math.hypot(this.playerPos.x - lm.x, this.playerPos.z - lm.z);
-      if (d < bestD) {
-        bestD = d;
+      const norm = d / zoneRadius;
+      if (norm < bestScore) {
+        bestScore = norm;
         closestName = lm.nameAr;
       }
     }
@@ -4058,6 +4847,23 @@ export class DragonEngine {
         this.phase === 'on_foot' &&
         this.riderPos.distanceTo(this.landedDragonPos) < 16,
       isInWater: this.phase === 'skydiving' && this.skydiveState === 'in_water',
+      warType: this.warType,
+      warTimeLeft: Math.ceil(this.warTimeLeft),
+      warDuration: this.warDuration,
+      warStatus: this.warStatus,
+      warDragonsKilled: this.warDragonsKilled,
+      warDragonsGoal: this.warDragonsGoal,
+      warShipsSunk: this.warShipsSunk,
+      warShipsGoal: this.warShipsGoal,
+      progression: {
+        ...this.progression,
+        knightUpgrades: { ...this.progression.knightUpgrades },
+        dragonUpgrades: { ...this.progression.dragonUpgrades },
+      },
+      dangerAlertActive: this.dangerAlertTimer > 0,
+      activeLoreTaleId: this.activeLoreTaleId,
+      activeLoreSegment: this.activeLoreSegment,
+      isLorePlaying: this.isLorePlaying,
     });
   }
 
@@ -4318,6 +5124,42 @@ export class DragonEngine {
       }
     }
 
+    // Cinematic Surface Impact VFX: Wall Scorch / Rock Gouge Scars + Directional Sparks + Impact Flash!
+    if (Math.random() < 0.52) {
+      const fromVec = impactVel
+        ? new THREE.Vector3(-impactVel.x, 0.25, -impactVel.z)
+        : new THREE.Vector3(this.playerPos.x - b.pos.x, 2, this.playerPos.z - b.pos.z);
+      if (fromVec.lengthSq() > 0.001) {
+        fromVec.normalize();
+      } else {
+        fromVec.set(0, 0.25, 1).normalize();
+      }
+      const surfPt = b.pos
+        .clone()
+        .addScaledVector(fromVec, b.radius * 0.92)
+        .add(
+          new THREE.Vector3(
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.35) * b.height * 0.45,
+            (Math.random() - 0.5) * 4,
+          ),
+        );
+      const scarKind =
+        element === 'fire' ? 'fire' : element === 'ice' ? 'ice' : element === 'rock' ? 'rock' : 'sword';
+      this.spawnSurfaceScar(surfPt, fromVec, 3.6 + Math.random() * 2.2, scarKind);
+      this.spawnSparkBurst(
+        surfPt,
+        fromVec,
+        14,
+        element === 'ice' ? 0xbae6fd : element === 'fire' ? 0xff8c24 : 0xffd166,
+        1.05,
+      );
+      this.triggerVfxFlash(surfPt, element === 'ice' ? 0x7dd3fc : 0xff7b1a, 0.85);
+      if (element === 'rock' || element === 'ram') {
+        this.spawnShockwaveRing(surfPt, fromVec, 0.7, 6.2, 0xfbbf24, 0.42);
+      }
+    }
+
     if (Math.random() < 0.85) {
       this.spawnDebris(b.pos, 4, kind, 16, 0.75, impactVel);
     }
@@ -4373,35 +5215,29 @@ export class DragonEngine {
   private destroyTree(t: DestructibleTree): void {
     if (t.destroyed) return;
     t.destroyed = true;
-    if (this.world.palmTrunkInst) {
-      this.world.palmTrunkInst.setMatrixAt(t.index, _zeroMatrix);
-      this.world.palmTrunkInst.instanceMatrix.needsUpdate = true;
-    }
-    if (this.world.palmCrownInst) {
-      this.world.palmCrownInst.setMatrixAt(t.index, _zeroMatrix);
-      this.world.palmCrownInst.instanceMatrix.needsUpdate = true;
-    }
+    this.world.hideTree(t);
 
-    this.spawnDebris(t.pos, 6, 'wood', 18, 0.75);
-    _v3.set(t.pos.x, t.pos.y + 8, t.pos.z);
-    this.spawnDebris(_v3, 7, 'leaf', 20, 0.9);
-    for (let k = 0; k < 6; k++) {
+    const isEnchanted = t.kind === 'enchanted';
+    this.spawnDebris(t.pos, 7, 'wood', 19, isEnchanted ? 0.95 : 0.75);
+    _v3.set(t.pos.x, t.pos.y + (isEnchanted ? 12 : 8), t.pos.z);
+    this.spawnDebris(_v3, 8, 'leaf', 22, isEnchanted ? 1.1 : 0.9);
+    for (let k = 0; k < 8; k++) {
       this.spawnParticle(
         t.pos.x,
-        t.pos.y + 6,
+        t.pos.y + (isEnchanted ? 10 : 6),
         t.pos.z,
-        (Math.random() - 0.5) * 14,
-        4 + Math.random() * 8,
-        (Math.random() - 0.5) * 14,
-        0x4d7c0f,
-        0.75,
-        1.6,
-        4.5,
-        8,
+        (Math.random() - 0.5) * 16,
+        4 + Math.random() * 9,
+        (Math.random() - 0.5) * 16,
+        isEnchanted ? 0x2dd4bf : 0x4d7c0f,
+        0.85,
+        1.9,
+        5.2,
+        7,
       );
     }
     this.audio.playCrash('wood', false);
-    this.impactShake = Math.max(this.impactShake, 0.32);
+    this.impactShake = Math.max(this.impactShake, 0.34);
   }
 
   private checkShipMastFracture(ship: PirateShipActor): void {
@@ -4452,9 +5288,17 @@ export class DragonEngine {
         k < 13,
       );
     }
+    this.spawnSparkBurst(sp.clone().setY(6), _unitY, 28, 0xff9b38, 1.4);
+    this.spawnShockwaveRing(sp.clone().setY(4), _unitY, 1.5, 22, 0xff6b00, 0.65);
+    this.triggerVfxFlash(sp.clone().setY(8), 0xff6b00, 1.35);
     this.audio.playCrash('wood', true);
     this.impactShake = Math.max(this.impactShake, 0.88);
     this.allyScore += 200;
+    this.audio.speakKnight('battle_cry');
+    if (this.mode === 'combat' && this.warStatus === 'active' && this.warType !== 'dragons') {
+      this.warShipsSunk += 1;
+      this.checkWarResolution();
+    }
   }
 
   private damageShip(
@@ -4492,6 +5336,33 @@ export class DragonEngine {
       }
     }
 
+    // Cinematic Hull Burn Scars & Sparks attached to Ship Group!
+    if (Math.random() < 0.55) {
+      const fromVec = impactVel
+        ? new THREE.Vector3(-impactVel.x, 0.35, -impactVel.z)
+        : new THREE.Vector3(this.playerPos.x - sp.x, 3, this.playerPos.z - sp.z);
+      if (fromVec.lengthSq() > 0.001) {
+        fromVec.normalize();
+      } else {
+        fromVec.set(0, 0.4, 1).normalize();
+      }
+      const hullPt = sp
+        .clone()
+        .addScaledVector(fromVec, 5.2)
+        .add(new THREE.Vector3((Math.random() - 0.5) * 3, 2.8 + Math.random() * 3.5, (Math.random() - 0.5) * 5));
+      const scarKind =
+        element === 'fire' ? 'fire' : element === 'ice' ? 'ice' : element === 'rock' ? 'rock' : 'sword';
+      this.spawnSurfaceScar(hullPt, fromVec, 3.2 + Math.random() * 1.6, scarKind, ship.group);
+      this.spawnSparkBurst(
+        hullPt,
+        fromVec,
+        14,
+        element === 'ice' ? 0xbae6fd : 0xffaa33,
+        1.05,
+      );
+      this.triggerVfxFlash(hullPt, element === 'ice' ? 0x7dd3fc : 0xff7b1a, 0.8);
+    }
+
     if (Math.random() < 0.85) {
       this.spawnDebris(
         sp,
@@ -4507,6 +5378,259 @@ export class DragonEngine {
 
     if (ship.hp <= 0) {
       this.destroyPirateShip(ship);
+    }
+  }
+
+  private checkWarResolution(): void {
+    if (this.warStatus !== 'active') return;
+    const dragonsDone = this.warDragonsKilled >= this.warDragonsGoal;
+    const shipsDone = this.warShipsSunk >= this.warShipsGoal;
+    if (dragonsDone && shipsDone) {
+      this.completeWarVictory();
+    }
+  }
+
+  private resolveWarOnTimerEnd(): void {
+    if (this.warStatus !== 'active') return;
+    if (
+      (this.warDragonsKilled > 0 || this.warShipsSunk > 0) &&
+      this.allyScore >= this.enemyScore
+    ) {
+      this.completeWarVictory();
+    } else {
+      this.warStatus = 'defeat';
+      this.triggerDirectionalDangerHorn(this.playerPos.clone().add(new THREE.Vector3(60, 0, -60)));
+      this.emitHud();
+    }
+  }
+
+  private completeWarVictory(): void {
+    this.warStatus = 'victory';
+    const spiritBonus = this.progression.knightUpgrades.spirit >= 2 ? 1 : 0;
+    const kPts = (this.warType === 'both' ? 3 : 2) + spiritBonus;
+    const dPts = this.warType === 'both' ? 3 : 2;
+    this.progression.knightPoints += kPts;
+    this.progression.dragonPoints += dPts;
+    this.progression.warsWon += 1;
+    this.progression.warWave += 1;
+    this.saveProgression();
+    this.audio.playBondChime(1.0);
+    this.audio.playRoar(this.activeElement);
+    this.audio.speakKnight('victory', true);
+    this.emitHud();
+  }
+
+  private triggerDirectionalDangerHorn(threatPos: THREE.Vector3): void {
+    if (this.dangerHornCooldown > 0) return;
+    this.dangerHornCooldown = 8.5;
+    this.dangerAlertTimer = 3.2;
+
+    const focus = this.phase === 'skydiving' || this.phase === 'on_foot' ? this.riderPos : this.playerPos;
+    _v1.copy(threatPos).sub(focus);
+    const dist = _v1.length();
+    if (dist > 0.01) _v1.divideScalar(dist);
+    _right.set(1, 0, 0).applyQuaternion(this.camera.quaternion).normalize();
+    const pan = THREE.MathUtils.clamp(_v1.dot(_right), -1, 1);
+    const distRatio = THREE.MathUtils.clamp(1 - dist / 750, 0.28, 1.0);
+    this.audio.playWarHorn(pan, distRatio);
+    this.audio.speakKnight('danger');
+  }
+
+  private spawnSurfaceScar(
+    worldPos: THREE.Vector3,
+    worldNormal: THREE.Vector3,
+    size: number,
+    kind: 'sword' | 'fire' | 'rock' | 'ice',
+    parent: THREE.Object3D = this.scene,
+  ): void {
+    if (this.surfaceScars.length >= 68) {
+      const oldest = this.surfaceScars.shift();
+      if (oldest) {
+        oldest.parent.remove(oldest.mesh);
+        (oldest.mesh.material as THREE.Material).dispose();
+      }
+    }
+
+    const mat = new THREE.MeshStandardMaterial({
+      map: this.scarTex,
+      color: kind === 'ice' ? 0xdbeafe : kind === 'fire' ? 0x1c120d : 0x261d17,
+      emissive:
+        kind === 'fire'
+          ? 0xff4d00
+          : kind === 'sword'
+            ? 0xff9f38
+            : kind === 'ice'
+              ? 0x38bdf8
+              : 0x92400e,
+      emissiveIntensity: kind === 'fire' ? 0.95 : kind === 'sword' ? 0.78 : 0.45,
+      transparent: true,
+      opacity: 0.92,
+      roughness: 0.85,
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    const mesh = new THREE.Mesh(this.scarGeo, mat);
+    const n = worldNormal.clone().normalize();
+    const worldPt = worldPos.clone().addScaledVector(n, 0.16);
+    if (parent !== this.scene) {
+      parent.worldToLocal(worldPt);
+      mesh.position.copy(worldPt);
+    } else {
+      mesh.position.copy(worldPt);
+    }
+
+    const q = new THREE.Quaternion().setFromUnitVectors(_unitZ, n);
+    mesh.quaternion.copy(q);
+    if (parent !== this.scene) {
+      const parentInv = new THREE.Quaternion();
+      parent.getWorldQuaternion(parentInv).invert();
+      mesh.quaternion.premultiply(parentInv);
+    }
+    mesh.rotateZ(kind === 'sword' ? -0.65 + (Math.random() - 0.5) * 0.6 : Math.random() * Math.PI * 2);
+    if (kind === 'sword') {
+      mesh.scale.set(size * 1.45, size * 0.42, 1);
+    } else {
+      mesh.scale.set(size, size * (0.85 + Math.random() * 0.3), 1);
+    }
+    parent.add(mesh);
+
+    this.surfaceScars.push({
+      mesh,
+      parent,
+      life: 16,
+      maxLife: 16,
+      baseOpacity: 0.92,
+    });
+  }
+
+  private spawnSparkBurst(
+    origin: THREE.Vector3,
+    normal: THREE.Vector3,
+    count: number,
+    colorHex: number,
+    speedScale = 1.0,
+  ): void {
+    const n = normal.clone().normalize();
+    for (let i = 0; i < count; i++) {
+      if (this.vfxSparks.length >= 140) break;
+      const mat = new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity: 0.96,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sparkGeo, mat);
+      mesh.position.copy(origin);
+      const spd = (18 + Math.random() * 28) * speedScale;
+      const vel = new THREE.Vector3(
+        n.x * 0.55 + (Math.random() - 0.5) * 1.4,
+        n.y * 0.55 + Math.random() * 0.9,
+        n.z * 0.55 + (Math.random() - 0.5) * 1.4,
+      )
+        .normalize()
+        .multiplyScalar(spd);
+      mesh.scale.set(1, 1, 0.7 + Math.random() * 0.9);
+      this.scene.add(mesh);
+      this.vfxSparks.push({
+        mesh,
+        vel,
+        life: 0.35 + Math.random() * 0.35,
+        maxLife: 0.65,
+      });
+    }
+  }
+
+  private spawnShockwaveRing(
+    pos: THREE.Vector3,
+    normal: THREE.Vector3,
+    startScale: number,
+    endScale: number,
+    colorHex: number,
+    duration = 0.48,
+  ): void {
+    if (this.vfxShockRings.length >= 18) return;
+    const mat = new THREE.MeshBasicMaterial({
+      map: this.shockRingTex,
+      color: colorHex,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(this.shockRingGeo, mat);
+    mesh.position.copy(pos);
+    const n = normal.clone().normalize();
+    mesh.quaternion.setFromUnitVectors(_unitZ, n);
+    mesh.scale.setScalar(startScale);
+    this.scene.add(mesh);
+    this.vfxShockRings.push({
+      mesh,
+      life: duration,
+      maxLife: duration,
+      startScale,
+      endScale,
+    });
+  }
+
+  private triggerVfxFlash(pos: THREE.Vector3, colorHex: number, power = 1.0): void {
+    this.vfxFlashLight.position.copy(pos);
+    this.vfxFlashLight.color.setHex(colorHex);
+    this.vfxFlashPower = Math.max(this.vfxFlashPower, power);
+  }
+
+  private updateVfx(dt: number): void {
+    for (let i = this.vfxSparks.length - 1; i >= 0; i--) {
+      const sp = this.vfxSparks[i];
+      sp.life -= dt;
+      if (sp.life <= 0) {
+        this.scene.remove(sp.mesh);
+        (sp.mesh.material as THREE.Material).dispose();
+        this.vfxSparks.splice(i, 1);
+        continue;
+      }
+      sp.vel.y -= 28 * dt;
+      sp.mesh.position.addScaledVector(sp.vel, dt);
+      _v2.copy(sp.mesh.position).add(sp.vel);
+      sp.mesh.lookAt(_v2);
+      const t = sp.life / sp.maxLife;
+      (sp.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, t * 1.4);
+    }
+
+    for (let i = this.vfxShockRings.length - 1; i >= 0; i--) {
+      const r = this.vfxShockRings[i];
+      r.life -= dt;
+      if (r.life <= 0) {
+        this.scene.remove(r.mesh);
+        (r.mesh.material as THREE.Material).dispose();
+        this.vfxShockRings.splice(i, 1);
+        continue;
+      }
+      const p = 1 - r.life / r.maxLife;
+      const s = THREE.MathUtils.lerp(r.startScale, r.endScale, 1 - (1 - p) * (1 - p));
+      r.mesh.scale.setScalar(s);
+      (r.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - p) * 0.85;
+    }
+
+    for (let i = this.surfaceScars.length - 1; i >= 0; i--) {
+      const sc = this.surfaceScars[i];
+      sc.life -= dt;
+      if (sc.life <= 0) {
+        sc.parent.remove(sc.mesh);
+        (sc.mesh.material as THREE.Material).dispose();
+        this.surfaceScars.splice(i, 1);
+        continue;
+      }
+      const mat = sc.mesh.material as THREE.MeshStandardMaterial;
+      mat.emissiveIntensity = Math.max(0, mat.emissiveIntensity - dt * 0.14);
+      if (sc.life < 3.0) {
+        mat.opacity = sc.baseOpacity * (sc.life / 3.0);
+      }
     }
   }
 
@@ -4548,6 +5672,23 @@ export class DragonEngine {
     for (const d of this.debris) {
       this.scene.remove(d.mesh);
     }
+    for (const sc of this.surfaceScars) {
+      sc.parent.remove(sc.mesh);
+      (sc.mesh.material as THREE.Material).dispose();
+    }
+    for (const sp of this.vfxSparks) {
+      this.scene.remove(sp.mesh);
+      (sp.mesh.material as THREE.Material).dispose();
+    }
+    for (const r of this.vfxShockRings) {
+      this.scene.remove(r.mesh);
+      (r.mesh.material as THREE.Material).dispose();
+    }
+    this.scarGeo.dispose();
+    this.sparkGeo.dispose();
+    this.shockRingGeo.dispose();
+    this.scarTex.dispose();
+    this.shockRingTex.dispose();
     this.fireGeo.dispose();
     this.fireMat.dispose();
     this.iceGeo.dispose();

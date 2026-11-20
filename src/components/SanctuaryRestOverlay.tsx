@@ -2,16 +2,27 @@ import React from 'react';
 import {
   Bandage,
   BatteryCharging,
+  BookOpen,
   Compass,
   Flame,
   Maximize2,
   Minimize2,
   Mountain,
   Shield,
+  Ship,
   Snowflake,
+  Sparkles,
+  Swords,
   Wind,
 } from 'lucide-react';
-import { DRAGON_SPECS, DragonId, GameMode, HudState } from '../game/types';
+import {
+  ANCIENT_LORE_TALES,
+  DRAGON_SPECS,
+  DragonId,
+  GameMode,
+  HudState,
+  WarTargetType,
+} from '../game/types';
 
 interface SanctuaryRestOverlayProps {
   hud: HudState;
@@ -21,6 +32,9 @@ interface SanctuaryRestOverlayProps {
   onRechargeEnergy: () => void;
   onSelectDragon: (id: DragonId) => void;
   onSelectMode: (mode: GameMode) => void;
+  onSelectWarType: (warType: WarTargetType) => void;
+  onOpenUpgrades: () => void;
+  onOpenLore: () => void;
   onTakeOff: () => void;
 }
 
@@ -32,6 +46,9 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
   onRechargeEnergy,
   onSelectDragon,
   onSelectMode,
+  onSelectWarType,
+  onOpenUpgrades,
+  onOpenLore,
   onTakeOff,
 }) => {
   const spec = DRAGON_SPECS[hud.dragonId];
@@ -39,17 +56,21 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
   const energyPct = Math.round((hud.energy / hud.maxEnergy) * 100);
   const fullHp = hud.hp >= hud.maxHp;
   const fullEnergy = hud.energy >= hud.maxEnergy;
+  const totalPoints = hud.progression.knightPoints + hud.progression.dragonPoints;
+  const unlockedLoreCount = ANCIENT_LORE_TALES.filter(
+    (t) => hud.progression.loreElapsedSeconds >= t.unlockSeconds,
+  ).length;
 
   return (
     <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between p-3 md:p-4">
-      <header className="pointer-events-auto mx-auto flex w-full max-w-4xl items-center justify-between gap-4 rounded-xl px-4 py-2 bg-slate-950/60 backdrop-blur-md border border-white/10">
+      <header className="pointer-events-auto mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-2 bg-slate-950/60 backdrop-blur-md border border-white/10">
         <div>
           <h2 className="font-display text-xl font-bold text-amber-300">
             كهف الملاذ الصخري — {spec.nameAr}
           </h2>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <div className="flex items-center gap-1 rounded-lg bg-black/45 p-1 border border-white/10">
             <button
               type="button"
@@ -77,6 +98,32 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
             </button>
           </div>
 
+          {hud.mode === 'combat' && (
+            <div className="hidden md:flex items-center gap-1 rounded-lg bg-black/45 p-1 border border-white/10">
+              {(
+                [
+                  { id: 'dragons', label: 'تنانين', Icon: Wind },
+                  { id: 'ships', label: 'سفن', Icon: Ship },
+                  { id: 'both', label: 'كلاهما', Icon: Swords },
+                ] as const
+              ).map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => onSelectWarType(id)}
+                  className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                    hud.warType === id
+                      ? 'bg-sky-500 text-slate-950 font-bold'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon className="w-3 h-3" />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <button
             type="button"
             onClick={onToggleFullscreen}
@@ -92,10 +139,10 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
         </div>
       </header>
 
-      {/* Bottom Care & Recovery Panel */}
-      <section className="pointer-events-auto mx-auto w-full max-w-4xl rounded-2xl p-3 md:p-4 bg-slate-950/65 backdrop-blur-md border border-white/10">
+      {/* Bottom Care, Sanctuary Tales & Recovery Panel */}
+      <section className="pointer-events-auto mx-auto w-full max-w-5xl rounded-2xl p-3 md:p-4 bg-slate-950/65 backdrop-blur-md border border-white/10">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-          {/* Health & Energy Bars + Healing Actions */}
+          {/* Health & Energy Bars + Healing & Lore Library Actions */}
           <div className="md:col-span-7 flex flex-col gap-3">
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -129,33 +176,59 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <button
                 type="button"
                 onClick={onTendWounds}
                 disabled={fullHp}
-                className={`flex-1 flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                className={`flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                   fullHp
                     ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-400/30 cursor-default'
                     : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                 }`}
               >
-                <Bandage className="w-4 h-4" />
-                <span>{fullHp ? 'التأمت الجروح' : 'رفيف وتضميد الجروح'}</span>
+                <Bandage className="w-4 h-4 shrink-0" />
+                <span>{fullHp ? 'التأمت الجروح' : 'تضميد الجروح'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={onRechargeEnergy}
                 disabled={fullEnergy}
-                className={`flex-1 flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                className={`flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                   fullEnergy
                     ? 'bg-amber-500/15 text-amber-300 border border-amber-400/30 cursor-default'
                     : 'bg-sky-600 hover:bg-sky-500 text-white'
                 }`}
               >
-                <BatteryCharging className="w-4 h-4" />
-                <span>{fullEnergy ? 'الطاقة مكتملة' : 'إعادة شحن الطاقة'}</span>
+                <BatteryCharging className="w-4 h-4 shrink-0" />
+                <span>{fullEnergy ? 'طاقة مكتملة' : 'شحن الطاقة'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={onOpenLore}
+                className="flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-bold bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-400/45 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <BookOpen className="w-4 h-4 shrink-0 text-amber-300" />
+                <span>مكتبة الأساطير</span>
+                <span className="font-mono-nums text-[11px] text-amber-300">
+                  {unlockedLoreCount}/{ANCIENT_LORE_TALES.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={onOpenUpgrades}
+                className="flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-bold bg-white/10 hover:bg-white/20 text-sky-200 border border-white/20 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Sparkles className="w-4 h-4 shrink-0 text-sky-300" />
+                <span>التطويرات</span>
+                {totalPoints > 0 && (
+                  <span className="font-mono-nums text-[11px] text-amber-300">
+                    +{totalPoints}
+                  </span>
+                )}
               </button>
             </div>
           </div>

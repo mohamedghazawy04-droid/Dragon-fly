@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { FlightHud } from './components/FlightHud';
+import { LoreLibraryModal } from './components/LoreLibraryModal';
 import { SanctuaryBondOverlay } from './components/SanctuaryBondOverlay';
 import { SanctuaryRestOverlay } from './components/SanctuaryRestOverlay';
+import { UpgradesModal } from './components/UpgradesModal';
 import { DragonEngine } from './game/DragonEngine';
 import {
   DEFAULT_HUD_LAYOUT,
+  DEFAULT_PROGRESSION,
   HudControlId,
   HudLayoutConfig,
   HudState,
@@ -99,6 +102,19 @@ const INITIAL_HUD: HudState = {
   knifeEdgeSide: 0,
   nearLandedDragon: false,
   isInWater: false,
+  warType: 'both',
+  warTimeLeft: 120,
+  warDuration: 120,
+  warStatus: 'idle',
+  warDragonsKilled: 0,
+  warDragonsGoal: 3,
+  warShipsSunk: 0,
+  warShipsGoal: 3,
+  progression: DEFAULT_PROGRESSION,
+  dangerAlertActive: false,
+  activeLoreTaleId: null,
+  activeLoreSegment: 0,
+  isLorePlaying: false,
 };
 
 export default function App() {
@@ -108,6 +124,8 @@ export default function App() {
   const [muted, setMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [layout, setLayout] = useState<HudLayoutConfig>(() => loadSavedLayout());
+  const [showUpgradesModal, setShowUpgradesModal] = useState(false);
+  const [showLoreModal, setShowLoreModal] = useState(false);
 
   useEffect(() => {
     const container = canvasMountRef.current;
@@ -185,7 +203,14 @@ export default function App() {
           onSelectDragon={(id) => engineRef.current?.selectDragon(id)}
           onBondStep={() => engineRef.current?.bondStep()}
           onSelectMode={(m) => engineRef.current?.setMode(m)}
-          onLaunch={() => engineRef.current?.launchFlight()}
+          onSelectWarType={(wt) => engineRef.current?.setWarType(wt)}
+          onOpenUpgrades={() => setShowUpgradesModal(true)}
+          onOpenLore={() => setShowLoreModal(true)}
+          onLaunch={() => {
+            setShowLoreModal(false);
+            setShowUpgradesModal(false);
+            engineRef.current?.launchFlight();
+          }}
         />
       )}
 
@@ -221,6 +246,8 @@ export default function App() {
           onRoar={() => engineRef.current?.triggerRoar()}
           onFlyLandmark={(id) => engineRef.current?.flyToLandmark(id)}
           onRequestPointerLock={() => engineRef.current?.requestPointerLock()}
+          onOpenUpgrades={() => setShowUpgradesModal(true)}
+          onStartNewWar={() => engineRef.current?.startNewWarWave()}
         />
       )}
 
@@ -233,7 +260,36 @@ export default function App() {
           onRechargeEnergy={() => engineRef.current?.rechargeEnergy()}
           onSelectDragon={(id) => engineRef.current?.selectDragon(id)}
           onSelectMode={(m) => engineRef.current?.setMode(m)}
-          onTakeOff={() => engineRef.current?.launchFlight()}
+          onSelectWarType={(wt) => engineRef.current?.setWarType(wt)}
+          onOpenUpgrades={() => setShowUpgradesModal(true)}
+          onOpenLore={() => setShowLoreModal(true)}
+          onTakeOff={() => {
+            setShowLoreModal(false);
+            setShowUpgradesModal(false);
+            engineRef.current?.launchFlight();
+          }}
+        />
+      )}
+
+      {showUpgradesModal && (
+        <UpgradesModal
+          hud={hud}
+          onSelectWarType={(wt) => engineRef.current?.setWarType(wt)}
+          onUpgradeKnight={(k) => engineRef.current?.upgradeKnight(k)}
+          onUpgradeDragon={(k) => engineRef.current?.upgradeDragon(k)}
+          onSaveProgression={() => engineRef.current?.saveProgression()}
+          onResetProgression={() => engineRef.current?.resetProgression()}
+          onClose={() => setShowUpgradesModal(false)}
+        />
+      )}
+
+      {showLoreModal && (
+        <LoreLibraryModal
+          hud={hud}
+          muted={muted}
+          onPlayTale={(id) => engineRef.current?.playLoreTale(id)}
+          onStopTale={() => engineRef.current?.stopLoreTale()}
+          onClose={() => setShowLoreModal(false)}
         />
       )}
     </main>

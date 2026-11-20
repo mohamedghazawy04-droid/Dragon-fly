@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  BookOpen,
   Compass,
   Flame,
   HeartHandshake,
@@ -7,10 +8,20 @@ import {
   Minimize2,
   Mountain,
   Shield,
+  Ship,
   Snowflake,
+  Sparkles,
+  Swords,
   Wind,
 } from 'lucide-react';
-import { DRAGON_SPECS, DragonId, GameMode, HudState } from '../game/types';
+import {
+  ANCIENT_LORE_TALES,
+  DRAGON_SPECS,
+  DragonId,
+  GameMode,
+  HudState,
+  WarTargetType,
+} from '../game/types';
 
 interface SanctuaryBondOverlayProps {
   hud: HudState;
@@ -19,6 +30,9 @@ interface SanctuaryBondOverlayProps {
   onSelectDragon: (id: DragonId) => void;
   onBondStep: () => void;
   onSelectMode: (mode: GameMode) => void;
+  onSelectWarType: (warType: WarTargetType) => void;
+  onOpenUpgrades: () => void;
+  onOpenLore: () => void;
   onLaunch: () => void;
 }
 
@@ -29,15 +43,22 @@ export const SanctuaryBondOverlay: React.FC<SanctuaryBondOverlayProps> = ({
   onSelectDragon,
   onBondStep,
   onSelectMode,
+  onSelectWarType,
+  onOpenUpgrades,
+  onOpenLore,
   onLaunch,
 }) => {
   const currentSpec = DRAGON_SPECS[hud.dragonId];
   const isBonded = hud.bondLevel >= 100;
+  const totalPoints = hud.progression.knightPoints + hud.progression.dragonPoints;
+  const unlockedLoreCount = ANCIENT_LORE_TALES.filter(
+    (t) => hud.progression.loreElapsedSeconds >= t.unlockSeconds,
+  ).length;
 
   return (
     <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between p-3 md:p-4">
       {/* Top Title Header */}
-      <header className="pointer-events-auto mx-auto flex w-full max-w-5xl items-center justify-between gap-4 rounded-xl px-4 py-2 bg-slate-950/60 backdrop-blur-md border border-white/10">
+      <header className="pointer-events-auto mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-2.5 rounded-xl px-4 py-2 bg-slate-950/60 backdrop-blur-md border border-white/10">
         <div className="flex items-center gap-3">
           <h1 className="font-display text-xl md:text-2xl font-bold tracking-wide text-amber-300 whitespace-nowrap">
             أجنحة السماء: فرسان التنانين
@@ -47,7 +68,7 @@ export const SanctuaryBondOverlay: React.FC<SanctuaryBondOverlayProps> = ({
           </span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           {/* Mode Switcher */}
           <div className="flex items-center gap-1 rounded-lg bg-black/45 p-1 border border-white/10">
             <button
@@ -75,6 +96,58 @@ export const SanctuaryBondOverlay: React.FC<SanctuaryBondOverlayProps> = ({
               <span>تحليق حر</span>
             </button>
           </div>
+
+          {hud.mode === 'combat' && (
+            <div className="hidden md:flex items-center gap-1 rounded-lg bg-black/45 p-1 border border-white/10">
+              {(
+                [
+                  { id: 'dragons', label: 'تنانين', Icon: Wind },
+                  { id: 'ships', label: 'سفن', Icon: Ship },
+                  { id: 'both', label: 'كلاهما', Icon: Swords },
+                ] as const
+              ).map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => onSelectWarType(id)}
+                  className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                    hud.warType === id
+                      ? 'bg-sky-500 text-slate-950 font-bold'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon className="w-3 h-3" />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenLore}
+            className="flex items-center gap-1.5 rounded-lg bg-black/50 hover:bg-black/75 px-2.5 py-1.5 text-xs font-medium text-amber-200 border border-white/15 cursor-pointer whitespace-nowrap"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-amber-300" />
+            <span>الأساطير</span>
+            <span className="font-mono-nums text-[11px] text-slate-300">
+              {unlockedLoreCount}/{ANCIENT_LORE_TALES.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenUpgrades}
+            className="flex items-center gap-1.5 rounded-lg bg-black/50 hover:bg-black/75 px-2.5 py-1.5 text-xs font-medium text-sky-200 border border-white/15 cursor-pointer whitespace-nowrap"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-sky-300" />
+            <span>التطويرات</span>
+            {totalPoints > 0 && (
+              <span className="font-mono-nums text-[11px] font-bold text-amber-300">
+                +{totalPoints}
+              </span>
+            )}
+          </button>
 
           <button
             type="button"

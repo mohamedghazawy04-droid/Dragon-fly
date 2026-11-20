@@ -679,3 +679,84 @@ export function createVolumetricCloudTexture(maxAnisotropy: number): THREE.DataT
   return tex;
 }
 
+/**
+ * Generates a high-contrast surface decal texture for sword slashes & dragon fire scorches
+ * on castle masonry, palace walls, and wooden ship hulls.
+ */
+export function createImpactScarTexture(maxAnisotropy: number): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+
+  // Outer soot / scorch halo
+  const grad = ctx.createRadialGradient(128, 128, 8, 128, 128, 118);
+  grad.addColorStop(0, 'rgba(18, 12, 10, 0.94)');
+  grad.addColorStop(0.38, 'rgba(32, 22, 16, 0.78)');
+  grad.addColorStop(0.7, 'rgba(20, 16, 14, 0.36)');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+
+  // Jagged diagonal gouge / slash fissures radiating from center
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 6; i++) {
+    const angle = -0.38 + (i - 2.5) * 0.24;
+    const len = i === 2 || i === 3 ? 98 : 54 + (i % 2) * 26;
+    ctx.strokeStyle = i === 2 || i === 3 ? 'rgba(8, 6, 5, 0.96)' : 'rgba(14, 10, 8, 0.85)';
+    ctx.lineWidth = i === 2 || i === 3 ? 8 : 4;
+    ctx.beginPath();
+    ctx.moveTo(128 - Math.cos(angle) * len, 128 - Math.sin(angle) * len);
+    ctx.quadraticCurveTo(
+      128 + (Math.random() - 0.5) * 14,
+      128 + (Math.random() - 0.5) * 14,
+      128 + Math.cos(angle) * len,
+      128 + Math.sin(angle) * len,
+    );
+    ctx.stroke();
+  }
+
+  // Hot glowing edge highlights along main central gouge
+  ctx.strokeStyle = 'rgba(255, 138, 42, 0.52)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(46, 152);
+  ctx.quadraticCurveTo(128, 126, 210, 104);
+  ctx.stroke();
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = maxAnisotropy;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * Generates an expanding luminous shockwave ring texture for heavy impacts and explosions.
+ */
+export function createShockwaveRingTexture(): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+
+  const grad = ctx.createRadialGradient(128, 128, 72, 128, 128, 126);
+  grad.addColorStop(0, 'rgba(255, 255, 255, 0)');
+  grad.addColorStop(0.45, 'rgba(255, 210, 140, 0.35)');
+  grad.addColorStop(0.72, 'rgba(255, 245, 220, 0.95)');
+  grad.addColorStop(0.88, 'rgba(255, 170, 75, 0.55)');
+  grad.addColorStop(1, 'rgba(255, 120, 30, 0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+

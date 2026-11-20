@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Camera,
   Check,
+  Clock,
   Cloud,
   CloudLightning,
   CloudRain,
@@ -24,9 +25,12 @@ import {
   RotateCw,
   Settings,
   Shield,
+  Ship,
   Snowflake,
+  Sparkles,
   Sun,
   Swords,
+  Trophy,
   Volume2,
   VolumeX,
   Wind,
@@ -73,6 +77,8 @@ interface FlightHudProps {
   onRoar: () => void;
   onFlyLandmark: (id: string) => void;
   onRequestPointerLock: () => void;
+  onOpenUpgrades: () => void;
+  onStartNewWar: () => void;
 }
 
 export const FlightHud: React.FC<FlightHudProps> = ({
@@ -103,6 +109,8 @@ export const FlightHud: React.FC<FlightHudProps> = ({
   onRoar,
   onFlyLandmark,
   onRequestPointerLock,
+  onOpenUpgrades,
+  onStartNewWar,
 }) => {
   const [cinemaMode, setCinemaMode] = useState(false);
   const [showLandmarks, setShowLandmarks] = useState(false);
@@ -210,6 +218,11 @@ export const FlightHud: React.FC<FlightHudProps> = ({
       opacity: repositionMode ? 1 : opacity,
     };
   };
+
+  const warMin = Math.floor(Math.max(0, hud.warTimeLeft) / 60);
+  const warSec = Math.max(0, hud.warTimeLeft) % 60;
+  const warTimeFormatted = `${String(warMin).padStart(2, '0')}:${String(warSec).padStart(2, '0')}`;
+  const totalUpgradePts = hud.progression.knightPoints + hud.progression.dragonPoints;
 
   return (
     <div
@@ -328,11 +341,53 @@ export const FlightHud: React.FC<FlightHudProps> = ({
           </div>
 
           {hud.mode === 'combat' && !layout.compactTopBar && (
-            <div className="flex items-center gap-2 rounded-xl px-2.5 py-1 bg-slate-950/55 border border-white/15 text-[11px]">
-              <span className="text-sky-300 font-bold font-mono-nums">{hud.allyScore}</span>
-              <span className="text-slate-500">:</span>
-              <span className="text-rose-400 font-bold font-mono-nums">{hud.enemyScore}</span>
+            <div
+              className={`flex items-center gap-2 rounded-xl px-2.5 py-1 bg-slate-950/55 border text-[11px] font-mono-nums ${
+                hud.dangerAlertActive
+                  ? 'border-rose-400/80 text-rose-200'
+                  : 'border-white/15'
+              }`}
+            >
+              <span className="inline-flex items-center gap-1 text-amber-300 font-bold">
+                <Clock className="w-3 h-3" />
+                {warTimeFormatted}
+              </span>
+              {hud.warType !== 'ships' && (
+                <>
+                  <span className="text-slate-600">|</span>
+                  <span className="inline-flex items-center gap-1 text-sky-300 font-bold">
+                    <Wind className="w-3 h-3" />
+                    {hud.warDragonsKilled}/{hud.warDragonsGoal}
+                  </span>
+                </>
+              )}
+              {hud.warType !== 'dragons' && (
+                <>
+                  <span className="text-slate-600">|</span>
+                  <span className="inline-flex items-center gap-1 text-orange-300 font-bold">
+                    <Ship className="w-3 h-3" />
+                    {hud.warShipsSunk}/{hud.warShipsGoal}
+                  </span>
+                </>
+              )}
             </div>
+          )}
+
+          {hud.mode === 'combat' && (
+            <button
+              type="button"
+              onClick={onOpenUpgrades}
+              title="ترسانة الفارس وتطويرات التنين"
+              className="flex items-center gap-1 rounded-xl px-2 py-1.5 text-[11px] bg-slate-950/55 border border-white/15 text-sky-200 hover:text-white cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-sky-300" />
+              {!layout.compactTopBar && <span className="hidden sm:inline">تطوير</span>}
+              {totalUpgradePts > 0 && (
+                <span className="font-mono-nums font-bold text-amber-300">
+                  +{totalUpgradePts}
+                </span>
+              )}
+            </button>
           )}
 
           <button
@@ -478,6 +533,36 @@ export const FlightHud: React.FC<FlightHudProps> = ({
           </div>
         )}
       </div>
+
+      {/* War Round Resolution Banner */}
+      {hud.mode === 'combat' &&
+        (hud.warStatus === 'victory' || hud.warStatus === 'defeat') &&
+        !repositionMode && (
+          <div className="pointer-events-auto fixed top-14 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 rounded-2xl px-4 py-2 hud-surface-strong border border-amber-400/60 shadow-2xl">
+            <Trophy
+              className={`w-4 h-4 ${
+                hud.warStatus === 'victory' ? 'text-amber-300' : 'text-rose-400'
+              }`}
+            />
+            <span className="text-xs font-extrabold text-white whitespace-nowrap">
+              {hud.warStatus === 'victory' ? 'نصر الحرب — تم منح نقاط التطوير' : 'انتهت الجولة'}
+            </span>
+            <button
+              type="button"
+              onClick={onOpenUpgrades}
+              className="rounded-lg px-2.5 py-1 text-[11px] font-bold bg-sky-500 hover:bg-sky-400 text-slate-950 cursor-pointer whitespace-nowrap"
+            >
+              التطويرات
+            </button>
+            <button
+              type="button"
+              onClick={onStartNewWar}
+              className="rounded-lg px-2.5 py-1 text-[11px] font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer whitespace-nowrap"
+            >
+              جولة جديدة
+            </button>
+          </div>
+        )}
 
       {/* Customizable Draggable Control Groups (Visible unless Cinema Mode) */}
       {(!cinemaMode || repositionMode) && (
@@ -803,6 +888,23 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                     <span>امتطاء</span>
                   </button>
                 </>
+              )}
+
+              {(hud.phase === 'on_foot' ||
+                (hud.phase === 'flying' && !hud.boardableEnemyId)) && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    if (repositionMode) return;
+                    e.stopPropagation();
+                    onSwordSlash();
+                  }}
+                  title="ضربة سيف (F)"
+                  className="flex items-center justify-center gap-1 rounded-xl px-3 py-2 text-[11px] font-bold text-amber-100 bg-rose-700/75 hover:bg-rose-600/85 border border-amber-300/60 cursor-pointer"
+                >
+                  <Swords className="w-3.5 h-3.5 text-amber-200" />
+                  <span>سيف</span>
+                </button>
               )}
 
               {(hud.boardableEnemyId || hud.phase === 'boarding') && (
