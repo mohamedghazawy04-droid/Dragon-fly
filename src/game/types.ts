@@ -344,6 +344,13 @@ export interface EnemyIndicator {
   isAlly: boolean;
 }
 
+export type ManeuverKind =
+  | 'none'
+  | 'sharp_turn'
+  | 'knife_edge'
+  | 'half_loop'
+  | 'steep_dive';
+
 export interface HudState {
   phase: GamePhase;
   mode: GameMode;
@@ -379,6 +386,12 @@ export interface HudState {
   cameraView: CameraView;
   isLooping: boolean;
   knifeEdgeSide: -1 | 0 | 1;
+  maneuverKind: ManeuverKind;
+  maneuverSide: -1 | 0 | 1;
+  maneuverIntensity: number;
+  bankAngleDeg: number;
+  motionBlurIntensity: number;
+  isBoosting: boolean;
   nearLandedDragon: boolean;
   isInWater: boolean;
   warType: WarTargetType;
@@ -394,6 +407,7 @@ export interface HudState {
   activeLoreTaleId: string | null;
   activeLoreSegment: number;
   isLorePlaying: boolean;
+  knightSpeechText: string | null;
 }
 
 export type HudControlId = 'joystick' | 'attack' | 'elements' | 'actions' | 'vitals';

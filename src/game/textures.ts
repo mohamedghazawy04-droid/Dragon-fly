@@ -571,8 +571,9 @@ export function createDragonEyeTexture(
 }
 
 /**
- * Generates a tileable 256x256 RGBA cloud volume sprite texture combining multi-octave
- * periodic FBM curl wisps and soft Worley billow lobes for UE5 volumetric cloud cards.
+ * Generates a tileable 256x256 RGBA cloud volume sprite texture combining 6-octave
+ * periodic FBM curl wisps and dual-scale Worley cauliflower billow domes for
+ * photorealistic self-shadowed volumetric clouds.
  */
 export function createVolumetricCloudTexture(maxAnisotropy: number): THREE.DataTexture {
   const size = 256;
@@ -601,9 +602,9 @@ export function createVolumetricCloudTexture(maxAnisotropy: number): THREE.DataT
 
   const fbm = (u: number, v: number): number => {
     let val = 0;
-    let amp = 0.52;
+    let amp = 0.5;
     let freq = 4;
-    for (let o = 0; o < 4; o++) {
+    for (let o = 0; o < 6; o++) {
       val += smoothNoise(u * freq, v * freq, freq) * amp;
       freq *= 2;
       amp *= 0.5;
@@ -611,17 +612,49 @@ export function createVolumetricCloudTexture(maxAnisotropy: number): THREE.DataT
     return val;
   };
 
-  // Precompute periodic Worley billow cells
-  const cellCount = 6;
-  const pts: { x: number; y: number }[] = [];
-  for (let cy = 0; cy < cellCount; cy++) {
-    for (let cx = 0; cx < cellCount; cx++) {
-      pts.push({
-        x: cx + 0.15 + hash2(cx, cy, cellCount) * 0.7,
-        y: cy + 0.15 + hash2(cx + 13, cy + 7, cellCount) * 0.7,
-      });
+  const buildWorleyGrid = (cellCount: number, seedShift: number) => {
+    const pts: { x: number; y: number }[] = [];
+    for (let cy = 0; cy < cellCount; cy++) {
+      for (let cx = 0; cx < cellCount; cx++) {
+        pts.push({
+          x: cx + 0.14 + hash2(cx + seedShift, cy + seedShift * 3, cellCount) * 0.72,
+          y: cy + 0.14 + hash2(cx + 13 + seedShift, cy + 7 + seedShift * 5, cellCount) * 0.72,
+        });
+      }
     }
-  }
+    return pts;
+  };
+
+  const sampleWorley = (
+    u: number,
+    v: number,
+    cellCount: number,
+    pts: { x: number; y: number }[],
+    falloff: number,
+  ): number => {
+    const gx = u * cellCount;
+    const gy = v * cellCount;
+    const cix = Math.floor(gx);
+    const ciy = Math.floor(gy);
+    let minD2 = 9.0;
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        const ncx = ((cix + ox) % cellCount + cellCount) % cellCount;
+        const ncy = ((ciy + oy) % cellCount + cellCount) % cellCount;
+        const pt = pts[ncy * cellCount + ncx];
+        const px = pt.x + (cix + ox - ncx);
+        const py = pt.y + (ciy + oy - ncy);
+        const d2 = (gx - px) * (gx - px) + (gy - py) * (gy - py);
+        if (d2 < minD2) minD2 = d2;
+      }
+    }
+    return Math.max(0, 1 - Math.sqrt(minD2) * falloff);
+  };
+
+  const coarseCells = 5;
+  const fineCells = 11;
+  const coarsePts = buildWorleyGrid(coarseCells, 1);
+  const finePts = buildWorleyGrid(fineCells, 19);
 
   for (let y = 0; y < size; y++) {
     const v = y / size;
@@ -631,38 +664,35 @@ export function createVolumetricCloudTexture(maxAnisotropy: number): THREE.DataT
       const dx = (u - 0.5) * 2;
       const radial = Math.hypot(dx, dy);
 
-      const nMain = fbm(u, v);
-      const nDetail = fbm(u * 2.0 + 0.37, v * 2.0 + 0.71);
+      // Domain-warped FBM for organic turbulent billowing edges
+      const warpX = fbm(u + 0.13, v + 0.29) - 0.5;
+      const warpY = fbm(u + 0.61, v + 0.47) - 0.5;
+      const wu = u + warpX * 0.085;
+      const wv = v + warpY * 0.085;
 
-      // Periodic Worley inverse distance for fluffy cumulus domes
-      const gx = u * cellCount;
-      const gy = v * cellCount;
-      const cix = Math.floor(gx);
-      const ciy = Math.floor(gy);
-      let minD2 = 9.0;
-      for (let oy = -1; oy <= 1; oy++) {
-        for (let ox = -1; ox <= 1; ox++) {
-          const ncx = ((cix + ox) % cellCount + cellCount) % cellCount;
-          const ncy = ((ciy + oy) % cellCount + cellCount) % cellCount;
-          const pt = pts[ncy * cellCount + ncx];
-          const px = pt.x + (cix + ox - ncx);
-          const py = pt.y + (ciy + oy - ncy);
-          const d2 = (gx - px) * (gx - px) + (gy - py) * (gy - py);
-          if (d2 < minD2) minD2 = d2;
-        }
-      }
-      const worleyLobe = Math.max(0, 1 - Math.sqrt(minD2) * 0.92);
+      const nMain = fbm(wu, wv);
+      const nDetail = fbm(wu * 2.1 + 0.37, wv * 2.1 + 0.71);
 
-      // Organic radial mask eroded cleanly at edges by FBM wisps
-      const edgeMask = Math.max(0, 1 - Math.pow(radial, 1.45));
+      const worleyCoarse = sampleWorley(wu, wv, coarseCells, coarsePts, 0.88);
+      const worleyFine = sampleWorley(wu + 0.21, wv + 0.17, fineCells, finePts, 0.96);
+      const billowDome = worleyCoarse * 0.66 + worleyFine * 0.34;
+
+      // Sculpted organic cloud silhouette: flat cumulus underside, fluffy towering domes
+      const edgeMask = Math.max(0, 1 - Math.pow(radial, 1.58));
+      const heightDensity = billowDome * 0.58 + nMain * 0.42;
       const rawDensity =
-        edgeMask * (0.58 + nMain * 0.52 + worleyLobe * 0.38) - (1 - edgeMask) * (1 - nDetail) * 0.25;
-      const alpha = Math.max(0, Math.min(1, rawDensity * 1.15));
+        edgeMask * (0.44 + billowDome * 0.56 + nMain * 0.46) -
+        (1 - edgeMask) * (1 - nDetail) * 0.34;
+      const alpha = Math.max(0, Math.min(1, rawDensity * 1.24));
 
       const p = (y * size + x) * 4;
-      data[p] = Math.round(Math.min(1, 0.45 + worleyLobe * 0.35 + nMain * 0.28) * 255);
+      // R: sculpted cumulus billow height for self-shadow raymarch
+      data[p] = Math.round(Math.min(1, heightDensity * 1.08) * 255);
+      // G: fine animated wispy curl turbulence
       data[p + 1] = Math.round(nDetail * 255);
-      data[p + 2] = Math.round(edgeMask * 255);
+      // B: Beer-Lambert optical thickness core
+      data[p + 2] = Math.round(Math.min(1, edgeMask * (0.65 + billowDome * 0.45)) * 255);
+      // A: eroded wispy cloud opacity
       data[p + 3] = Math.round(alpha * 255);
     }
   }
@@ -755,6 +785,168 @@ export function createShockwaveRingTexture(): THREE.CanvasTexture {
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * Generates a tileable 256x256 RGBA volumetric smoke texture combining 6-octave periodic FBM
+ * curl filaments and dual-scale Worley eddy domes for realistic billowing soot, ash, and steam plumes:
+ *   R = Billow dome elevation (for directional sunlight self-shadowing)
+ *   G = Fine turbulent curl tendrils (for animated shader advection & wispy erosion)
+ *   B = Dense optical soot core density
+ *   A = Soft organic puff alpha envelope
+ */
+export function createRealisticSmokeTexture(maxAnisotropy: number): THREE.DataTexture {
+  const size = 256;
+  const data = new Uint8Array(size * size * 4);
+
+  const hash2 = (ix: number, iy: number, period: number): number => {
+    const px = ((ix % period) + period) % period;
+    const py = ((iy % period) + period) % period;
+    const n = Math.sin(px * 127.1 + py * 311.7) * 43758.5453123;
+    return n - Math.floor(n);
+  };
+
+  const smoothNoise = (x: number, y: number, period: number): number => {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    const fx = x - ix;
+    const fy = y - iy;
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    const a = hash2(ix, iy, period);
+    const b = hash2(ix + 1, iy, period);
+    const c = hash2(ix, iy + 1, period);
+    const d = hash2(ix + 1, iy + 1, period);
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  };
+
+  const fbm = (u: number, v: number, startFreq = 4, octaves = 6): number => {
+    let val = 0;
+    let amp = 0.5;
+    let freq = startFreq;
+    let norm = 0;
+    for (let o = 0; o < octaves; o++) {
+      val += smoothNoise(u * freq, v * freq, freq) * amp;
+      norm += amp;
+      freq *= 2;
+      amp *= 0.5;
+    }
+    return val / Math.max(0.001, norm);
+  };
+
+  const buildWorleyGrid = (cellCount: number, seedShift: number) => {
+    const pts: { x: number; y: number }[] = [];
+    for (let cy = 0; cy < cellCount; cy++) {
+      for (let cx = 0; cx < cellCount; cx++) {
+        pts.push({
+          x: cx + 0.14 + hash2(cx + seedShift, cy + seedShift * 3, cellCount) * 0.72,
+          y: cy + 0.14 + hash2(cx + 17 + seedShift, cy + 11 + seedShift * 5, cellCount) * 0.72,
+        });
+      }
+    }
+    return pts;
+  };
+
+  const sampleWorley = (
+    u: number,
+    v: number,
+    cellCount: number,
+    pts: { x: number; y: number }[],
+    falloff: number,
+  ): number => {
+    const gx = u * cellCount;
+    const gy = v * cellCount;
+    const cix = Math.floor(gx);
+    const ciy = Math.floor(gy);
+    let minD2 = 9.0;
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        const ncx = ((cix + ox) % cellCount + cellCount) % cellCount;
+        const ncy = ((ciy + oy) % cellCount + cellCount) % cellCount;
+        const pt = pts[ncy * cellCount + ncx];
+        const px = pt.x + (cix + ox - ncx);
+        const py = pt.y + (ciy + oy - ncy);
+        const d2 = (gx - px) * (gx - px) + (gy - py) * (gy - py);
+        if (d2 < minD2) minD2 = d2;
+      }
+    }
+    return Math.max(0, 1 - Math.sqrt(minD2) * falloff);
+  };
+
+  const smoothstepLocal = (e0: number, e1: number, v: number) => {
+    const t = Math.max(0, Math.min(1, (v - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+
+  const coarseCells = 4;
+  const fineCells = 9;
+  const coarsePts = buildWorleyGrid(coarseCells, 7);
+  const finePts = buildWorleyGrid(fineCells, 31);
+
+  for (let y = 0; y < size; y++) {
+    const v = y / size;
+    const dy = (v - 0.5) * 2;
+    for (let x = 0; x < size; x++) {
+      const u = x / size;
+      const dx = (u - 0.5) * 2;
+      const radial = Math.hypot(dx, dy);
+
+      // Rotational swirl + turbulent FBM domain warp for realistic smoke eddies
+      const angle = Math.atan2(dy, dx);
+      const swirl = (1 - Math.min(1, radial)) * 0.14;
+      const su = u + Math.cos(angle + 1.57) * swirl;
+      const sv = v + Math.sin(angle + 1.57) * swirl;
+
+      const warpX = fbm(su + 0.17, sv + 0.31, 4, 4) - 0.5;
+      const warpY = fbm(su + 0.63, sv + 0.52, 4, 4) - 0.5;
+      const wu = su + warpX * 0.19;
+      const wv = sv + warpY * 0.19;
+
+      const fbmCoarse = fbm(wu, wv, 4, 5);
+      const fbmFine = fbm(wu * 2.0 + 0.29, wv * 2.0 + 0.43, 6, 6);
+      const worleyCoarse = sampleWorley(wu, wv, coarseCells, coarsePts, 0.92);
+      const worleyFine = sampleWorley(wu + 0.19, wv - 0.13, fineCells, finePts, 1.02);
+
+      const domeHeight = Math.max(
+        0,
+        Math.min(1, worleyCoarse * 0.48 + worleyFine * 0.26 + fbmCoarse * 0.26),
+      );
+      const curlTendrils = Math.max(
+        0,
+        Math.min(1, fbmFine * 0.64 + worleyFine * 0.36),
+      );
+
+      const radialCore = 1.0 - smoothstepLocal(0.14, 0.9, radial);
+      const coreDensity = Math.max(
+        0,
+        Math.min(1, radialCore * (0.45 + fbmCoarse * 0.35 + worleyCoarse * 0.25)),
+      );
+
+      const distortedR = radial + (fbmCoarse - 0.5) * 0.46 + (fbmFine - 0.5) * 0.22;
+      const radialMask = 1.0 - smoothstepLocal(0.28, 0.96, distortedR);
+      const puffAlpha = Math.max(
+        0,
+        Math.min(1, radialMask * (0.56 + domeHeight * 0.44)),
+      );
+
+      const p = (y * size + x) * 4;
+      data[p] = Math.round(domeHeight * 255);
+      data[p + 1] = Math.round(curlTendrils * 255);
+      data[p + 2] = Math.round(coreDensity * 255);
+      data[p + 3] = Math.round(puffAlpha * 255);
+    }
+  }
+
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = maxAnisotropy;
   tex.needsUpdate = true;
   return tex;
 }

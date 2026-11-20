@@ -21,6 +21,8 @@ export interface DragonRig {
   rightWingTip: THREE.Object3D;
   leftHindLeg: THREE.Group;
   rightHindLeg: THREE.Group;
+  leftHindFoot: THREE.Group;
+  rightHindFoot: THREE.Group;
   tailSegments: THREE.Group[];
   riderCameraAnchor: THREE.Object3D;
   riderBodyGroup: THREE.Group;
@@ -32,6 +34,11 @@ export interface DragonRig {
   swordBladeMat: THREE.MeshPhysicalMaterial;
   auraLight: THREE.PointLight;
   setFrozen: (frozen: boolean) => void;
+  setLightningReflection: (
+    intensity: number,
+    dirWorld?: THREE.Vector3,
+    colorHex?: number,
+  ) => void;
   dispose: () => void;
 }
 
@@ -482,7 +489,43 @@ export function createDragonRig(
   const wingMaps = createDragonWingMembraneMaps(spec.membraneColor, maxAnisotropy);
   const eyeTex = createDragonEyeTexture(spec.eyeColor, maxAnisotropy);
 
-  // Ultra PBR Dragon Scale Material with normal relief, clearcoat & subtle iridescence
+  const lightningUniforms = {
+    uLightningReflect: { value: 0 },
+    uLightningColor: { value: new THREE.Color(0xcceeff) },
+    uLightningDir: { value: new THREE.Vector3(0.4, 0.85, -0.3).normalize() },
+  };
+
+  const applyLightningReflectionShader = (mat: THREE.MeshPhysicalMaterial, gain: number) => {
+    mat.customProgramCacheKey = () => `dragon-lightning-reflect-v1-${gain}`;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uLightningReflect = lightningUniforms.uLightningReflect;
+      shader.uniforms.uLightningColor = lightningUniforms.uLightningColor;
+      shader.uniforms.uLightningDir = lightningUniforms.uLightningDir;
+
+      shader.fragmentShader =
+        `uniform float uLightningReflect;\nuniform vec3 uLightningColor;\nuniform vec3 uLightningDir;\n` +
+        shader.fragmentShader;
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <opaque_fragment>',
+        `
+        if (uLightningReflect > 0.002) {
+          vec3 lViewDir = normalize(vViewPosition);
+          vec3 lSurfN = normalize(normal);
+          float lFresnel = pow(1.0 - clamp(abs(dot(lViewDir, lSurfN)), 0.0, 1.0), 2.2);
+          vec3 lDirView = normalize((viewMatrix * vec4(uLightningDir, 0.0)).xyz);
+          vec3 lHalf = normalize(lDirView + lViewDir);
+          float lSpec = pow(max(dot(lSurfN, lHalf), 0.0), 40.0);
+          float lWrap = max(dot(lSurfN, lDirView) * 0.55 + 0.45, 0.0);
+          outgoingLight += uLightningColor * uLightningReflect * ${gain.toFixed(2)} * (lFresnel * 1.45 + lSpec * 1.95 + lWrap * 0.25);
+        }
+        #include <opaque_fragment>
+        `,
+      );
+    };
+  };
+
+  // Ultra PBR Dragon Scale Material with normal relief, clearcoat, subtle iridescence & lightning reflections
   const primaryMat = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
     map: scaleMaps.map,
@@ -496,6 +539,7 @@ export function createDragonRig(
     iridescence: 0.26,
     iridescenceIOR: 1.38,
   });
+  applyLightningReflectionShader(primaryMat, 1.0);
 
   const armorMat = new THREE.MeshPhysicalMaterial({
     color: spec.secondaryColor,
@@ -506,6 +550,7 @@ export function createDragonRig(
     clearcoat: 0.4,
     clearcoatRoughness: 0.24,
   });
+  applyLightningReflectionShader(armorMat, 1.25);
 
   const bellyMat = new THREE.MeshStandardMaterial({
     color: spec.bellyColor,
@@ -532,6 +577,7 @@ export function createDragonRig(
     transparent: true,
     opacity: 0.96,
   });
+  applyLightningReflectionShader(membraneMat, 0.82);
 
   const eyeMat = new THREE.MeshStandardMaterial({
     map: eyeTex,
@@ -621,48 +667,143 @@ export function createDragonRig(
     bodyGroup.add(sh);
   });
 
-  // 2. Muscular Articulated Hind Legs & 3-Toed Talons
-  const buildHindLeg = (side: -1 | 1): THREE.Group => {
+  // 2. Anatomically Articulated Digitigrade Hind Legs, Elevated Knees & Forward-Planted 3-Toed Taloned Feet
+  // Total standing clearance from bodyGroup origin to bottom of foot soles = 4.00m
+  // (Thigh angles forward to elevated knee -> shin angles back to raised hock -> vertical metatarsus -> flat forward foot!)
+  const legUpAxis = new THREE.Vector3(0, 1, 0);
+  const orientMeshSegment = (
+    mesh: THREE.Mesh,
+    fromPt: THREE.Vector3,
+    toPt: THREE.Vector3,
+  ) => {
+    mesh.position.addVectors(fromPt, toPt).multiplyScalar(0.5);
+    const dir = new THREE.Vector3().subVectors(toPt, fromPt).normalize();
+    mesh.quaternion.setFromUnitVectors(legUpAxis, dir);
+  };
+
+  const buildHindLeg = (side: -1 | 1): { leg: THREE.Group; foot: THREE.Group } => {
     const leg = new THREE.Group();
-    leg.position.set(side * 1.32, -0.2, 2.05);
+    leg.position.set(side * 1.38, -0.34, 1.24);
     bodyGroup.add(leg);
 
-    const thighGeo = new THREE.CapsuleGeometry(0.58, 1.45, 8, 12);
+    const hipAnchor = new THREE.Vector3(side * 0.04, 0, 0);
+    // Knee stays HIGH under flank (y = -1.04 in leg space -> 2.62m above ground when standing!) and points FORWARD (-Z)
+    const kneePt = new THREE.Vector3(side * 0.18, -1.04, -0.64);
+    // Hock / upper ankle sits behind center (z = +0.26) well above earth
+    const hockPt = new THREE.Vector3(side * 0.22, -2.52, 0.26);
+    // Ankle-to-foot joint drops cleanly to foot pivot
+    const footPivotPt = new THREE.Vector3(side * 0.24, -3.48, -0.02);
+
+    // Muscular Upper Thigh (Hip -> Elevated Knee)
+    const thighLen = hipAnchor.distanceTo(kneePt);
+    const thighGeo = new THREE.CapsuleGeometry(0.62, Math.max(0.25, thighLen - 0.62), 8, 12);
     const thigh = new THREE.Mesh(thighGeo, primaryMat);
-    thigh.position.set(side * 0.18, -0.65, 0.25);
-    thigh.rotation.x = 0.68;
-    thigh.rotation.z = side * 0.18;
+    orientMeshSegment(thigh, hipAnchor, kneePt);
+    thigh.scale.set(0.92, 1.0, 1.12);
     thigh.castShadow = true;
     leg.add(thigh);
 
-    const shinGeo = new THREE.CapsuleGeometry(0.32, 1.4, 6, 10);
+    // Armored Knee Plate & Forward Knee Spur
+    const kneeArmor = new THREE.Mesh(new THREE.DodecahedronGeometry(0.42, 0), armorMat);
+    kneeArmor.position.copy(kneePt);
+    kneeArmor.scale.set(0.92, 1.12, 1.08);
+    kneeArmor.castShadow = true;
+    leg.add(kneeArmor);
+
+    // Sculpted Shin / Crus (Elevated Knee -> Raised Hock)
+    const shinLen = kneePt.distanceTo(hockPt);
+    const shinGeo = new THREE.CapsuleGeometry(0.36, Math.max(0.25, shinLen - 0.36), 6, 10);
     const shin = new THREE.Mesh(shinGeo, primaryMat);
-    shin.position.set(side * 0.24, -1.55, 1.15);
-    shin.rotation.x = -0.85;
+    orientMeshSegment(shin, kneePt, hockPt);
     shin.castShadow = true;
     leg.add(shin);
 
-    // 3 spread reptilian toes + curved obsidian claws
-    [-0.22, 0, 0.22].forEach((tx, idx) => {
-      const toe = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.1, 0.48, 4, 8),
-        bellyMat,
-      );
-      toe.rotation.x = Math.PI / 2.2;
-      toe.rotation.y = tx;
-      toe.position.set(side * 0.24 + tx * 0.9, -2.18, 1.65 + (idx === 1 ? 0.12 : 0));
-      leg.add(toe);
+    // Raised Hock Armor Cuff & Back Spur
+    const hockCuff = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.09, 6, 12), armorMat);
+    hockCuff.position.copy(hockPt);
+    hockCuff.rotation.x = Math.PI / 2;
+    leg.add(hockCuff);
 
-      const talon = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.45, 6), clawMat);
-      talon.rotation.x = Math.PI / 1.75;
-      talon.position.set(side * 0.24 + tx * 1.35, -2.25, 2.05 + (idx === 1 ? 0.15 : 0));
-      leg.add(talon);
+    const hockSpur = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.42, 6), clawMat);
+    hockSpur.position.set(hockPt.x, hockPt.y + 0.06, hockPt.z + 0.36);
+    hockSpur.rotation.x = Math.PI / 2.2;
+    leg.add(hockSpur);
+
+    // Upright Metatarsus Column (Raised Hock -> Planted Foot Pivot)
+    const metaLen = hockPt.distanceTo(footPivotPt);
+    const metaGeo = new THREE.CapsuleGeometry(0.25, Math.max(0.2, metaLen - 0.25), 6, 10);
+    const metatarsus = new THREE.Mesh(metaGeo, bellyMat);
+    orientMeshSegment(metatarsus, hockPt, footPivotPt);
+    metatarsus.castShadow = true;
+    leg.add(metatarsus);
+
+    // Articulated Foot Group (pivots to keep toes & talons flush on ground or thrusting forward in aerial clash!)
+    const foot = new THREE.Group();
+    foot.position.copy(footPivotPt);
+    leg.add(foot);
+
+    // Armored Ankle Ring & Broad Foot Sole Pad (bottom of sole rests at y = -0.18 -> total clearance = 4.00m)
+    const ankleCollar = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.08, 6, 12), armorMat);
+    ankleCollar.rotation.x = Math.PI / 2;
+    ankleCollar.position.set(0, 0.02, 0);
+    foot.add(ankleCollar);
+
+    const footPad = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.42, 0.24, 10), bellyMat);
+    footPad.position.set(0, -0.06, -0.08);
+    footPad.scale.set(1.18, 1.0, 1.32);
+    footPad.castShadow = true;
+    foot.add(footPad);
+
+    // 3 Large Splayed Forward-Pointing (-Z) Reptilian Toes + Curved Obsidian Talons
+    [-0.38, 0, 0.38].forEach((spreadYaw, idx) => {
+      const toeReach = idx === 1 ? 1.05 : 0.88;
+      const sinT = Math.sin(spreadYaw);
+      const cosT = Math.cos(spreadYaw);
+
+      const toeStart = new THREE.Vector3(sinT * 0.14, -0.07, -0.14 * cosT);
+      const toeEnd = new THREE.Vector3(sinT * toeReach, -0.11, -toeReach * cosT);
+      const toeLen = toeStart.distanceTo(toeEnd);
+
+      const toe = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.14, Math.max(0.18, toeLen - 0.14), 5, 8),
+        primaryMat,
+      );
+      orientMeshSegment(toe, toeStart, toeEnd);
+      toe.castShadow = true;
+      foot.add(toe);
+
+      const talonStart = toeEnd;
+      const talonEnd = new THREE.Vector3(
+        sinT * (toeReach + 0.56),
+        -0.18,
+        -(toeReach + 0.56) * cosT,
+      );
+      const talonLen = talonStart.distanceTo(talonEnd);
+      const talon = new THREE.Mesh(new THREE.ConeGeometry(0.12, talonLen, 7), clawMat);
+      orientMeshSegment(talon, talonStart, talonEnd);
+      talon.castShadow = true;
+      foot.add(talon);
     });
 
-    return leg;
+    // Rear Hallux / Heel Brace Claw (+Z)
+    const rearToeStart = new THREE.Vector3(0, -0.07, 0.12);
+    const rearToeEnd = new THREE.Vector3(0, -0.14, 0.58);
+    const rearTalon = new THREE.Mesh(
+      new THREE.ConeGeometry(0.1, rearToeStart.distanceTo(rearToeEnd), 6),
+      clawMat,
+    );
+    orientMeshSegment(rearTalon, rearToeStart, rearToeEnd);
+    rearTalon.castShadow = true;
+    foot.add(rearTalon);
+
+    return { leg, foot };
   };
-  const leftHindLeg = buildHindLeg(-1);
-  const rightHindLeg = buildHindLeg(1);
+  const leftHind = buildHindLeg(-1);
+  const rightHind = buildHindLeg(1);
+  const leftHindLeg = leftHind.leg;
+  const rightHindLeg = rightHind.leg;
+  const leftHindFoot = leftHind.foot;
+  const rightHindFoot = rightHind.foot;
 
   // Saddle & Forged Brass Pommel
   const leatherMat = new THREE.MeshStandardMaterial({
@@ -1361,6 +1502,28 @@ export function createDragonRig(
     });
   };
 
+  const setLightningReflection = (
+    intensity: number,
+    dirWorld?: THREE.Vector3,
+    colorHex?: number,
+  ) => {
+    const clamped = Math.max(0, Math.min(1.6, intensity));
+    lightningUniforms.uLightningReflect.value = clamped;
+    if (dirWorld && dirWorld.lengthSq() > 1e-4) {
+      lightningUniforms.uLightningDir.value.copy(dirWorld).normalize();
+    }
+    if (colorHex !== undefined) {
+      lightningUniforms.uLightningColor.value.setHex(colorHex);
+    }
+    const boost = Math.min(1, clamped);
+    primaryMat.clearcoat = 0.34 + boost * 0.58;
+    primaryMat.clearcoatRoughness = 0.32 - boost * 0.22;
+    primaryMat.iridescence = 0.26 + boost * 0.52;
+    armorMat.clearcoat = 0.4 + boost * 0.54;
+    armorMat.clearcoatRoughness = 0.24 - boost * 0.16;
+    membraneMat.clearcoat = 0.24 + boost * 0.52;
+  };
+
   return {
     root,
     bodyGroup,
@@ -1376,6 +1539,8 @@ export function createDragonRig(
     rightWingTip: right.wingTip,
     leftHindLeg,
     rightHindLeg,
+    leftHindFoot,
+    rightHindFoot,
     tailSegments,
     riderCameraAnchor,
     riderBodyGroup,
@@ -1387,6 +1552,7 @@ export function createDragonRig(
     swordBladeMat: bladeMat,
     auraLight,
     setFrozen,
+    setLightningReflection,
     dispose,
   };
 }

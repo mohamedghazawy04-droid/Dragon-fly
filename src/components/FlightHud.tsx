@@ -238,6 +238,192 @@ export const FlightHud: React.FC<FlightHudProps> = ({
         }`}
       />
 
+      {/* High-Speed / Boost Peripheral Motion-Blur Tunnel Vignette */}
+      {(hud.phase === 'flying' || hud.phase === 'skydiving') &&
+        hud.motionBlurIntensity > 0.08 && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none fixed inset-0 z-10 transition-opacity duration-100"
+            style={{
+              opacity: Math.min(0.85, hud.motionBlurIntensity * 0.9),
+              background: hud.isBoosting
+                ? 'radial-gradient(ellipse 68% 64% at 50% 50%, transparent 56%, rgba(251, 146, 60, 0.12) 84%, rgba(7, 10, 16, 0.42) 100%)'
+                : 'radial-gradient(ellipse 70% 66% at 50% 50%, transparent 58%, rgba(125, 211, 252, 0.08) 85%, rgba(7, 10, 16, 0.34) 100%)',
+            }}
+          />
+        )}
+
+      {/* Lateral Flashing Maneuver Orientation Indicators (Sharp Turns, Knife Edge 90°, Half-Loop, Steep Dive) */}
+      {hud.phase === 'flying' &&
+        !cinemaMode &&
+        !repositionMode &&
+        hud.maneuverKind !== 'none' && (() => {
+          const isKnife = hud.maneuverKind === 'knife_edge';
+          const isLoop = hud.maneuverKind === 'half_loop';
+          const isDive = hud.maneuverKind === 'steep_dive';
+          const showLeft = hud.maneuverSide === -1 || hud.maneuverSide === 0;
+          const showRight = hud.maneuverSide === 1 || hud.maneuverSide === 0;
+          const absBank = Math.min(90, Math.abs(hud.bankAngleDeg));
+          const titleAr = isKnife
+            ? 'طيران جانبي ٩٠°'
+            : isLoop
+              ? 'التفاف سماوي'
+              : isDive
+                ? 'انقضاض سريع'
+                : 'انعطاف حاد';
+
+          const accentText = isLoop
+            ? 'text-sky-300'
+            : isKnife
+              ? 'text-[#ff8c24]'
+              : 'text-amber-300';
+          const accentStroke = isLoop
+            ? '#7dd3fc'
+            : isKnife
+              ? '#ff8c24'
+              : '#fbbf24';
+          const borderTone = isLoop
+            ? 'border-sky-400/55'
+            : isKnife
+              ? 'border-[#ff8c24]/70'
+              : 'border-amber-400/55';
+          const leftGlow = isLoop
+            ? 'from-sky-400/30 via-sky-400/10 to-transparent'
+            : isKnife
+              ? 'from-[#ff8c24]/35 via-[#ff8c24]/12 to-transparent'
+              : 'from-amber-400/30 via-amber-400/10 to-transparent';
+          const rightGlow = isLoop
+            ? 'from-sky-400/30 via-sky-400/10 to-transparent'
+            : isKnife
+              ? 'from-[#ff8c24]/35 via-[#ff8c24]/12 to-transparent'
+              : 'from-amber-400/30 via-amber-400/10 to-transparent';
+
+          const renderChevrons = (dir: 'left' | 'right' | 'up' | 'down') => {
+            const rot =
+              dir === 'left'
+                ? 'rotate(180deg)'
+                : dir === 'up'
+                  ? 'rotate(-90deg)'
+                  : dir === 'down'
+                    ? 'rotate(90deg)'
+                    : 'rotate(0deg)';
+            const order = dir === 'left' ? [2, 1, 0] : [0, 1, 2];
+            return (
+              <div className="flex items-center gap-0.5" style={{ transform: rot }}>
+                {order.map((idx) => (
+                  <svg
+                    key={idx}
+                    viewBox="0 0 16 24"
+                    className="w-3.5 h-5 animate-maneuver-chevron"
+                    style={{ animationDelay: `${idx * 90}ms` }}
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M4 3L13 12L4 21"
+                      stroke={accentStroke}
+                      strokeWidth="2.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ))}
+              </div>
+            );
+          };
+
+          const renderHorizonGauge = () => (
+            <div className="relative w-8 h-8 flex items-center justify-center" aria-hidden="true">
+              {/* Fixed true-horizon ticks */}
+              <div className="absolute inset-x-0.5 h-px bg-white/30" />
+              <div className="absolute top-0.5 w-1 h-1 border-t border-white/50" />
+              {/* Rotating dragon wing-bank bar */}
+              <div
+                className="w-6 h-0.5 rounded-full transition-transform duration-75"
+                style={{
+                  backgroundColor: accentStroke,
+                  transform: `rotate(${-hud.bankAngleDeg}deg)`,
+                }}
+              >
+                <div
+                  className="mx-auto -mt-[3px] w-2 h-2 rounded-full border"
+                  style={{ borderColor: accentStroke, backgroundColor: '#070a10' }}
+                />
+              </div>
+            </div>
+          );
+
+          return (
+            <>
+              {/* Left Viewport Edge Flashing Indicator */}
+              {showLeft && (
+                <div className="pointer-events-none fixed left-0 top-1/2 -translate-y-1/2 z-15 flex items-center">
+                  <div
+                    className={`w-12 sm:w-16 h-48 sm:h-60 bg-gradient-to-r ${leftGlow} animate-maneuver-flash`}
+                    style={{ opacity: Math.max(0.45, hud.maneuverIntensity) }}
+                  />
+                  <div
+                    dir="rtl"
+                    className={`-ml-8 sm:-ml-11 flex items-center gap-2 rounded-xl px-2.5 py-2 bg-slate-950/75 border ${borderTone} shadow-xl animate-maneuver-flash`}
+                  >
+                    {renderChevrons(isLoop ? 'up' : isDive ? 'down' : 'left')}
+                    {renderHorizonGauge()}
+                    <div className="flex flex-col text-right leading-tight">
+                      <span className={`text-[11px] font-bold whitespace-nowrap ${accentText}`}>
+                        {titleAr}
+                      </span>
+                      <span className="font-mono-nums text-[10px] text-slate-200 whitespace-nowrap">
+                        {hud.maneuverSide === -1 ? 'يسار · ' : ''}
+                        {absBank}°
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Right Viewport Edge Flashing Indicator */}
+              {showRight && (
+                <div className="pointer-events-none fixed right-0 top-1/2 -translate-y-1/2 z-15 flex flex-row-reverse items-center">
+                  <div
+                    className={`w-12 sm:w-16 h-48 sm:h-60 bg-gradient-to-l ${rightGlow} animate-maneuver-flash`}
+                    style={{ opacity: Math.max(0.45, hud.maneuverIntensity) }}
+                  />
+                  <div
+                    dir="rtl"
+                    className={`-mr-8 sm:-mr-11 flex flex-row-reverse items-center gap-2 rounded-xl px-2.5 py-2 bg-slate-950/75 border ${borderTone} shadow-xl animate-maneuver-flash`}
+                  >
+                    {renderChevrons(isLoop ? 'up' : isDive ? 'down' : 'right')}
+                    {renderHorizonGauge()}
+                    <div className="flex flex-col text-right leading-tight">
+                      <span className={`text-[11px] font-bold whitespace-nowrap ${accentText}`}>
+                        {titleAr}
+                      </span>
+                      <span className="font-mono-nums text-[10px] text-slate-200 whitespace-nowrap">
+                        {hud.maneuverSide === 1 ? 'يمين · ' : ''}
+                        {absBank}°
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Opposite-Side Horizon Upright Marker during 90° Knife Edge */}
+              {isKnife && hud.maneuverSide !== 0 && (
+                <div
+                  className={`pointer-events-none fixed top-1/2 -translate-y-1/2 z-15 flex items-center gap-1.5 rounded-lg px-2 py-1 bg-slate-950/55 border border-white/15 ${
+                    hud.maneuverSide === -1 ? 'right-3' : 'left-3'
+                  }`}
+                >
+                  <ArrowUp className="w-3.5 h-3.5 text-sky-300" />
+                  <span className="text-[10px] font-medium text-slate-200 whitespace-nowrap">
+                    الأفق
+                  </span>
+                </div>
+              )}
+            </>
+          );
+        })()}
+
       {/* 3D Projected Target Indicators (Combat Mode only, optional) */}
       {layout.showIndicators &&
         hud.mode === 'combat' &&
@@ -600,7 +786,13 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                   <div className="h-full bg-amber-400" style={{ width: `${energyPct}%` }} />
                 </div>
               </div>
-              <span className="hidden md:inline font-mono-nums text-[10px] text-slate-300">
+              <span
+                className={`hidden md:inline font-mono-nums text-[10px] transition-colors ${
+                  hud.isBoosting || hud.motionBlurIntensity > 0.35
+                    ? 'text-amber-300 font-bold'
+                    : 'text-slate-300'
+                }`}
+              >
                 {hud.speed}م/ث
               </span>
             </div>

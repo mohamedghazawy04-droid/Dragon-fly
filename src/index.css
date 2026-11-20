@@ -33,3 +33,42 @@
   background-color: rgba(8, 12, 19, 0.93);
   border: 1px solid rgba(255, 255, 255, 0.16);
 }
+
+@keyframes maneuver-flash {
+  0%, 100% {
+    opacity: 0.42;
+    transform: scale(0.98);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+}
+
+@keyframes maneuver-chevron {
+  0%, 100% {
+    opacity: 0.24;
+    transform: scale(0.92);
+  }
+  45% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+.animate-maneuver-flash {
+  animation: maneuver-flash 0.48s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.animate-maneuver-chevron {
+  animation: maneuver-chevron 0.56s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-maneuver-flash,
+  .animate-maneuver-chevron {
+    animation: none;
+    opacity: 0.92;
+  }
+}
+

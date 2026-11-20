@@ -14,6 +14,7 @@ export interface CloudCluster {
   radius: number;
   baseY: number;
   driftPhase: number;
+  isVolcanic?: boolean;
 }
 
 export interface NarrowRockPillar {
@@ -1248,8 +1249,8 @@ export function buildDragonWorld(
   const terrainNormal = createTerrainNormalMap(maxAnisotropy);
   disposables.push(stoneTex, woodTex, sailTex, waterNormal, terrainNormal);
 
-  // 1. UE5 Atmospheric Sky Dome (wide 6200m radius for expanded open world)
-  const skyGeo = new THREE.SphereGeometry(6200, 40, 24);
+  // 1. UE5 Atmospheric Sky Dome (wide 8200m radius for ultra-high altitude soaring)
+  const skyGeo = new THREE.SphereGeometry(8200, 44, 28);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -1522,16 +1523,20 @@ export function buildDragonWorld(
   });
 
   oceanMaterial.onBeforeCompile = (shader) => {
+    const wakeTrailInit = Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 99, 0));
     shader.uniforms.uTime = { value: 0 };
     shader.uniforms.uStormFactor = { value: 0 };
     shader.uniforms.uLightning = { value: 0 };
     shader.uniforms.uSunDir = {
       value: new THREE.Vector3(0.62, 0.32, -0.72).normalize(),
     };
+    shader.uniforms.uDragonWakePos = { value: new THREE.Vector3(0, 0, 0) };
+    shader.uniforms.uDragonWakeDir = { value: new THREE.Vector2(0, -1) };
+    shader.uniforms.uWakeTrail = { value: wakeTrailInit };
     oceanMaterial.userData.shader = shader;
 
     shader.vertexShader =
-      `uniform float uTime;\nuniform float uStormFactor;\nvarying vec3 vWorldPos;\n` +
+      `uniform float uTime;\nuniform float uStormFactor;\nuniform vec3 uDragonWakePos;\nuniform vec2 uDragonWakeDir;\nvarying vec3 vWorldPos;\n` +
       shader.vertexShader;
     shader.vertexShader = shader.vertexShader.replace(
       '#include <begin_vertex>',
@@ -1540,14 +1545,86 @@ export function buildDragonWorld(
       float swellScale = 1.0 + uStormFactor * 1.45;
       float w1 = sin(position.x * 0.02 + uTime * (1.35 + uStormFactor * 0.65)) * cos(position.z * 0.02 + uTime * 1.1) * 0.9 * swellScale;
       float w2 = sin(position.x * 0.055 - uTime * (1.85 + uStormFactor * 0.9) + position.z * 0.045) * 0.38 * swellScale;
+      if (uDragonWakePos.z > 0.005) {
+        vec2 dW = position.xz - uDragonWakePos.xy;
+        float dLen2 = dot(dW, dW);
+        if (dLen2 < 18000.0) {
+          float dLen = sqrt(dLen2);
+          float along = dot(dW, uDragonWakeDir);
+          vec2 perpDir = vec2(-uDragonWakeDir.y, uDragonWakeDir.x);
+          float across = abs(dot(dW, perpDir));
+          float bow = exp(-dLen2 / 560.0) * sin(dLen * 0.42 - uTime * 9.5) * 1.15;
+          float behindDist = max(0.0, -along);
+          float vArm = exp(-pow(across - behindDist * 0.4 - 2.8, 2.0) / 52.0) * exp(-behindDist * 0.018);
+          float trough = -exp(-dLen2 / 150.0) * 0.8;
+          transformed.y += (bow + vArm * 1.15 + trough) * uDragonWakePos.z;
+        }
+      }
       transformed.y += w1 + w2;
       vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
       `,
     );
 
     shader.fragmentShader =
-      `uniform float uTime;\nuniform float uStormFactor;\nuniform float uLightning;\nuniform vec3 uSunDir;\nvarying vec3 vWorldPos;\n` +
-      shader.fragmentShader;
+      `uniform float uTime;
+uniform float uStormFactor;
+uniform float uLightning;
+uniform vec3 uSunDir;
+uniform vec3 uDragonWakePos;
+uniform vec2 uDragonWakeDir;
+uniform vec4 uWakeTrail[8];
+varying vec3 vWorldPos;
+
+float evalDragonWakeField(vec2 wp, out float foamOut) {
+  float h = 0.0;
+  foamOut = 0.0;
+
+  if (uDragonWakePos.z > 0.005) {
+    vec2 dW = wp - uDragonWakePos.xy;
+    float d2 = dot(dW, dW);
+    if (d2 < 24000.0) {
+      float str = uDragonWakePos.z;
+      float along = dot(dW, uDragonWakeDir);
+      vec2 perp = vec2(-uDragonWakeDir.y, uDragonWakeDir.x);
+      float acrossSigned = dot(dW, perp);
+      float across = abs(acrossSigned);
+      float behind = max(0.0, -along);
+
+      // Dynamic Kelvin V-wake crests & bow pressure wave
+      float d = sqrt(d2);
+      float bowWave = exp(-d2 / 420.0) * sin(d * 0.72 - uTime * 10.5);
+      float armOffset = across - behind * 0.36 - 2.4;
+      float vCrest = exp(-(armOffset * armOffset) / (10.0 + behind * 0.16)) * exp(-behind * 0.014);
+      float vRipple = sin(armOffset * 1.15 - uTime * 8.0) * vCrest;
+      float centerChurn = exp(-(across * across) / 20.0) * exp(-behind * 0.022) * step(along, 6.0);
+
+      h += (bowWave * 0.9 + vRipple * 1.15) * str;
+      foamOut += (vCrest * 0.85 + centerChurn * 0.75 + max(0.0, bowWave) * 0.4) * str;
+    }
+  }
+
+  for (int i = 0; i < 8; i++) {
+    vec4 node = uWakeTrail[i];
+    if (node.w <= 0.01 || node.z > 4.2) continue;
+    vec2 dv = wp - node.xy;
+    float d2 = dot(dv, dv);
+    if (d2 > 4200.0) continue;
+    float r = sqrt(d2) + 0.001;
+    float age = node.z;
+    float lifeFade = 1.0 - smoothstep(0.4, 4.2, age);
+    float ringR = 2.8 + age * 11.5;
+    float band = exp(-pow(r - ringR, 2.0) / (14.0 + age * 8.0));
+    float ang = atan(dv.y, dv.x);
+    float spiral = sin(r * 0.92 - age * 8.5 + ang * 2.0 * (mod(float(i), 2.0) * 2.0 - 1.0));
+    float eddy = band * (0.55 + 0.45 * spiral) * lifeFade * node.w;
+    h += eddy * 0.95;
+    foamOut += band * lifeFade * node.w * 0.52;
+  }
+
+  foamOut = clamp(foamOut, 0.0, 1.0);
+  return h;
+}
+` + shader.fragmentShader;
 
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <normal_fragment_maps>',
@@ -1570,6 +1647,16 @@ export function buildDragonWorld(
         vec3 mapN = normalize(vec3((nA.xy + nB.xy) * (0.65 + uStormFactor * 0.35) * normalScale, 1.0));
         normal = normalize( tbn * mapN );
       #endif
+      float _wakeDummyFoam = 0.0;
+      float _wakeEps = 0.85;
+      float _wC = evalDragonWakeField(vWorldPos.xz, _wakeDummyFoam);
+      if (abs(_wC) > 0.002 || _wakeDummyFoam > 0.01) {
+        float _wX = evalDragonWakeField(vWorldPos.xz + vec2(_wakeEps, 0.0), _wakeDummyFoam);
+        float _wZ = evalDragonWakeField(vWorldPos.xz + vec2(0.0, _wakeEps), _wakeDummyFoam);
+        vec3 wakeSlopeW = vec3((_wC - _wX) * 0.55, 0.0, (_wC - _wZ) * 0.55);
+        vec3 wakeTiltV = (viewMatrix * vec4(wakeSlopeW, 0.0)).xyz;
+        normal = normalize(normal + wakeTiltV);
+      }
       `,
     );
 
@@ -1587,6 +1674,12 @@ export function buildDragonWorld(
       diffuseColor.rgb = mix(diffuseColor.rgb, skyReflCol, fresnel * 0.62);
       float foamThreshold = mix(0.45, 0.20, uStormFactor);
       diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.46, 0.60, 0.68), smoothstep(foamThreshold, 0.96, crest) * (0.20 + uStormFactor * 0.34));
+      float wakeFoam = 0.0;
+      evalDragonWakeField(vWorldPos.xz, wakeFoam);
+      if (wakeFoam > 0.01) {
+        vec3 wakeFoamCol = mix(vec3(0.32, 0.68, 0.78), vec3(0.84, 0.94, 0.99), smoothstep(0.22, 0.85, wakeFoam));
+        diffuseColor.rgb = mix(diffuseColor.rgb, wakeFoamCol, wakeFoam * 0.78);
+      }
       `,
     );
   };
@@ -2516,12 +2609,19 @@ export function buildDragonWorld(
     });
   });
 
-  // 10. UE5 Volumetric-Lit Soft Atmospheric Cloud Banks (Single Instanced Draw Call + Scattering Shader)
+  // 10. UE5 Volumetric-Lit Soft Atmospheric, High-Altitude & Pyroclastic Volcanic Cloud Banks
   const cloudClusters: CloudCluster[] = [];
   const cloudTex = createVolumetricCloudTexture(maxAnisotropy);
-  const clusterCount = 98;
-  const puffsPerCluster = 10;
-  const totalPuffs = clusterCount * puffsPerCluster;
+  const atmClusterCount = 96;
+  const atmPuffsPerCluster = 12;
+  const highClusterCount = 44;
+  const highPuffsPerCluster = 10;
+  const volcanicClusterCount = 32;
+  const volcanicPuffsPerCluster = 12;
+  const totalPuffs =
+    atmClusterCount * atmPuffsPerCluster +
+    highClusterCount * highPuffsPerCluster +
+    volcanicClusterCount * volcanicPuffsPerCluster;
 
   const baseQuad = new THREE.PlaneGeometry(1, 1);
   const instCloudGeo = new THREE.InstancedBufferGeometry();
@@ -2534,35 +2634,38 @@ export function buildDragonWorld(
   const cloudSeeds = new Float32Array(totalPuffs * 4);
   const puffOffsets = new Float32Array(totalPuffs * 3);
   const puffScales = new Float32Array(totalPuffs * 2);
+  const volcanicFactors = new Float32Array(totalPuffs);
 
   let puffIdx = 0;
-  for (let i = 0; i < clusterCount; i++) {
-    const angle = (i / clusterCount) * Math.PI * 2 + (i % 5) * 0.37;
-    const dist = 165 + ((i * 197) % 2280);
+  // Layer A: Low & Mid Towering Cumulus Banks (72m - 215m)
+  for (let i = 0; i < atmClusterCount; i++) {
+    const angle = (i / atmClusterCount) * Math.PI * 2 + (i % 5) * 0.37;
+    const dist = 165 + ((i * 197) % 2320);
     const cx = Math.cos(angle) * dist;
     const cz = Math.sin(angle) * dist;
-    const cy = 68 + ((i * 31) % 116);
-    const clusterRadius = 42 + (i % 4) * 6;
+    const cy = 74 + ((i * 31) % 138);
+    const clusterRadius = 46 + (i % 4) * 7;
 
     cloudClusters.push({
       center: new THREE.Vector3(cx, cy, cz),
       radius: clusterRadius,
       baseY: cy,
       driftPhase: i * 0.65,
+      isVolcanic: false,
     });
 
-    for (let p = 0; p < puffsPerCluster; p++) {
-      const frac = p / puffsPerCluster;
+    for (let p = 0; p < atmPuffsPerCluster; p++) {
+      const frac = p / atmPuffsPerCluster;
       const puffAng = p * 2.39996 + i * 0.8;
-      const spreadR = (0.18 + (p % 4) * 0.24) * clusterRadius;
-      // Flat cumulus base with towering billow crown
-      const isCrown = p >= puffsPerCluster - 3;
-      const ox = cx + Math.cos(puffAng) * spreadR * (isCrown ? 0.52 : 1.0);
-      const oz = cz + Math.sin(puffAng) * spreadR * (isCrown ? 0.52 : 1.0);
-      const oy = cy + (isCrown ? 7.5 + (p - 7) * 4.8 : ((p % 3) - 1) * 3.2);
+      const spreadR = (0.16 + (p % 4) * 0.24) * clusterRadius;
+      // Flat cumulus base with sculpted multi-tier billow crown
+      const isCrown = p >= atmPuffsPerCluster - 4;
+      const ox = cx + Math.cos(puffAng) * spreadR * (isCrown ? 0.5 : 1.04);
+      const oz = cz + Math.sin(puffAng) * spreadR * (isCrown ? 0.5 : 1.04);
+      const oy = cy + (isCrown ? 8.5 + (p - 8) * 5.2 : ((p % 3) - 1) * 3.4);
 
-      const scaleW = (28 + ((i * 11 + p * 7) % 18)) * (isCrown ? 0.9 : 1.25);
-      const scaleH = scaleW * (isCrown ? 0.78 : 0.56);
+      const scaleW = (32 + ((i * 11 + p * 7) % 20)) * (isCrown ? 0.94 : 1.32);
+      const scaleH = scaleW * (isCrown ? 0.82 : 0.58);
 
       puffOffsets[puffIdx * 3] = ox;
       puffOffsets[puffIdx * 3 + 1] = oy;
@@ -2571,12 +2674,116 @@ export function buildDragonWorld(
       puffScales[puffIdx * 2] = scaleW;
       puffScales[puffIdx * 2 + 1] = scaleH;
 
-      cloudSeeds[puffIdx * 4] = ((i * 1.7 + p * 2.3) % (Math.PI * 2));
-      cloudSeeds[puffIdx * 4 + 1] = isCrown ? 0.85 + frac * 0.15 : 0.18 + (p % 3) * 0.26;
+      cloudSeeds[puffIdx * 4] = (i * 1.7 + p * 2.3) % (Math.PI * 2);
+      cloudSeeds[puffIdx * 4 + 1] = isCrown ? 0.82 + frac * 0.18 : 0.16 + (p % 3) * 0.26;
       cloudSeeds[puffIdx * 4 + 2] = ((i * 13 + p * 29) % 100) / 100;
       cloudSeeds[puffIdx * 4 + 3] = i * 0.65;
+      volcanicFactors[puffIdx] = 0;
 
       puffIdx++;
+    }
+  }
+
+  // Layer B: High-Altitude Stratospheric & Anvil Cloud Deck (295m - 640m) for soaring above the world
+  for (let hIdx = 0; hIdx < highClusterCount; hIdx++) {
+    const i = atmClusterCount + hIdx;
+    const angle = (hIdx / highClusterCount) * Math.PI * 2 + (hIdx % 7) * 0.29;
+    const dist = 120 + ((hIdx * 241) % 2380);
+    const cx = Math.cos(angle) * dist;
+    const cz = Math.sin(angle) * dist;
+    const cy = 295 + ((hIdx * 47) % 345);
+    const clusterRadius = 68 + (hIdx % 4) * 12;
+
+    cloudClusters.push({
+      center: new THREE.Vector3(cx, cy, cz),
+      radius: clusterRadius,
+      baseY: cy,
+      driftPhase: i * 0.52,
+      isVolcanic: false,
+    });
+
+    for (let p = 0; p < highPuffsPerCluster; p++) {
+      const frac = p / highPuffsPerCluster;
+      const puffAng = p * 2.39996 + hIdx * 1.1;
+      const spreadR = (0.18 + (p % 4) * 0.26) * clusterRadius;
+      const isCrown = p >= highPuffsPerCluster - 3;
+      const ox = cx + Math.cos(puffAng) * spreadR * (isCrown ? 0.55 : 1.12);
+      const oz = cz + Math.sin(puffAng) * spreadR * (isCrown ? 0.55 : 1.12);
+      const oy = cy + (isCrown ? 11.0 + (p - 7) * 6.4 : ((p % 3) - 1) * 4.2);
+
+      const scaleW = (52 + ((i * 13 + p * 9) % 28)) * (isCrown ? 0.96 : 1.42);
+      const scaleH = scaleW * (isCrown ? 0.72 : 0.44);
+
+      puffOffsets[puffIdx * 3] = ox;
+      puffOffsets[puffIdx * 3 + 1] = oy;
+      puffOffsets[puffIdx * 3 + 2] = oz;
+
+      puffScales[puffIdx * 2] = scaleW;
+      puffScales[puffIdx * 2 + 1] = scaleH;
+
+      cloudSeeds[puffIdx * 4] = (i * 1.4 + p * 2.5) % (Math.PI * 2);
+      cloudSeeds[puffIdx * 4 + 1] = isCrown ? 0.85 + frac * 0.15 : 0.22 + (p % 3) * 0.25;
+      cloudSeeds[puffIdx * 4 + 2] = ((i * 19 + p * 31) % 100) / 100;
+      cloudSeeds[puffIdx * 4 + 3] = i * 0.52;
+      volcanicFactors[puffIdx] = 0;
+
+      puffIdx++;
+    }
+  }
+
+  // Layer C: Dense pyroclastic ash & dirty-thunderstorm cloud banks above the Hidden Volcanic Archipelago
+  const volcanicAnchors = [
+    { x: -1520, z: -1500, spread: 345, baseMinY: 112, baseRangeY: 142, count: 18 },
+    { x: -1840, z: -1240, spread: 195, baseMinY: 96, baseRangeY: 105, count: 7 },
+    { x: -1230, z: -1780, spread: 190, baseMinY: 92, baseRangeY: 98, count: 7 },
+  ];
+  let volcClusterIdx = 0;
+  for (const anchor of volcanicAnchors) {
+    for (let k = 0; k < anchor.count; k++) {
+      const i = atmClusterCount + highClusterCount + volcClusterIdx;
+      const ringFrac = k === 0 ? 0.04 : 0.2 + ((k * 0.37) % 0.8);
+      const ang = k * 2.39996 + volcClusterIdx * 0.42;
+      const cx = anchor.x + Math.cos(ang) * anchor.spread * ringFrac;
+      const cz = anchor.z + Math.sin(ang) * anchor.spread * ringFrac;
+      const cy = anchor.baseMinY + ((volcClusterIdx * 23) % anchor.baseRangeY);
+      const clusterRadius = 50 + (volcClusterIdx % 4) * 7;
+
+      cloudClusters.push({
+        center: new THREE.Vector3(cx, cy, cz),
+        radius: clusterRadius,
+        baseY: cy,
+        driftPhase: i * 0.85,
+        isVolcanic: true,
+      });
+
+      for (let p = 0; p < volcanicPuffsPerCluster; p++) {
+        const frac = p / volcanicPuffsPerCluster;
+        const puffAng = p * 2.39996 + volcClusterIdx * 0.95;
+        const spreadR = (0.14 + (p % 4) * 0.25) * clusterRadius;
+        const isCrown = p >= volcanicPuffsPerCluster - 4;
+        const ox = cx + Math.cos(puffAng) * spreadR * (isCrown ? 0.58 : 1.04);
+        const oz = cz + Math.sin(puffAng) * spreadR * (isCrown ? 0.58 : 1.04);
+        const oy = cy + (isCrown ? 9.5 + (p - 8) * 5.8 : ((p % 3) - 1) * 4.2);
+
+        const scaleW = (40 + ((i * 13 + p * 9) % 22)) * (isCrown ? 1.08 : 1.38);
+        const scaleH = scaleW * (isCrown ? 0.88 : 0.68);
+
+        puffOffsets[puffIdx * 3] = ox;
+        puffOffsets[puffIdx * 3 + 1] = oy;
+        puffOffsets[puffIdx * 3 + 2] = oz;
+
+        puffScales[puffIdx * 2] = scaleW;
+        puffScales[puffIdx * 2 + 1] = scaleH;
+
+        cloudSeeds[puffIdx * 4] = (i * 1.9 + p * 2.1) % (Math.PI * 2);
+        cloudSeeds[puffIdx * 4 + 1] = isCrown ? 0.82 + frac * 0.18 : 0.14 + (p % 3) * 0.25;
+        cloudSeeds[puffIdx * 4 + 2] = ((i * 17 + p * 31) % 100) / 100;
+        cloudSeeds[puffIdx * 4 + 3] = i * 0.85;
+        volcanicFactors[puffIdx] = 0.84 + (p % 3) * 0.08;
+
+        puffIdx++;
+      }
+      volcClusterIdx++;
     }
   }
 
@@ -2592,6 +2799,10 @@ export function buildDragonWorld(
     'aCloudSeed',
     new THREE.InstancedBufferAttribute(cloudSeeds, 4),
   );
+  instCloudGeo.setAttribute(
+    'aVolcanicFactor',
+    new THREE.InstancedBufferAttribute(volcanicFactors, 1),
+  );
   instCloudGeo.instanceCount = totalPuffs;
 
   const cloudMat = new THREE.ShaderMaterial({
@@ -2604,37 +2815,51 @@ export function buildDragonWorld(
       uSunDir: { value: new THREE.Vector3(0.62, 0.32, -0.72).normalize() },
       uStormFactor: { value: 0 },
       uLightning: { value: 0 },
+      uVolcanicLightning: { value: 0 },
     },
     vertexShader: `
       attribute vec3 aCloudCenter;
       attribute vec2 aCloudSize;
       attribute vec4 aCloudSeed;
+      attribute float aVolcanicFactor;
       uniform float uTime;
+      uniform vec3 uSunDir;
       varying vec2 vUv;
       varying vec4 vSeed;
       varying vec3 vWorldPos;
       varying float vViewDist;
+      varying float vVolcanic;
+      varying vec2 vSunUvDir;
 
       void main() {
         vUv = uv;
         vSeed = aCloudSeed;
+        vVolcanic = aVolcanicFactor;
 
-        // Gentle atmospheric float + slow wind drift
+        // Atmospheric float + convective volcanic updraft swirl
         vec3 center = aCloudCenter;
-        center.y += sin(uTime * 0.32 + aCloudSeed.w) * 1.85;
-        center.x += sin(uTime * 0.04 + aCloudSeed.z * 6.2831) * 12.0;
+        center.y += sin(uTime * (0.32 + aVolcanicFactor * 0.18) + aCloudSeed.w) * (1.85 + aVolcanicFactor * 2.4);
+        center.x += sin(uTime * (0.04 + aVolcanicFactor * 0.08) + aCloudSeed.z * 6.2831) * (12.0 + aVolcanicFactor * 8.0);
+        center.z += cos(uTime * 0.07 + aCloudSeed.w) * (aVolcanicFactor * 7.0);
 
         // Extract camera right & up vectors directly from viewMatrix for silky billboarding
         vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
         vec3 camUp = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
 
-        float ang = aCloudSeed.x + sin(uTime * 0.08 + aCloudSeed.z * 6.28) * 0.08;
+        float ang = aCloudSeed.x + sin(uTime * (0.08 + aVolcanicFactor * 0.14) + aCloudSeed.z * 6.28) * (0.08 + aVolcanicFactor * 0.1);
         float c = cos(ang);
         float s = sin(ang);
         vec2 rotatedPos = vec2(
           position.x * c - position.y * s,
           position.x * s + position.y * c
         ) * aCloudSize;
+
+        // Project world sun direction into rotated sprite UV space for true volumetric self-shadowing
+        vec2 sunScreen = vec2(dot(uSunDir, camRight), dot(uSunDir, camUp));
+        vSunUvDir = vec2(
+          sunScreen.x * c + sunScreen.y * s,
+          -sunScreen.x * s + sunScreen.y * c
+        );
 
         vec3 worldPos = center + camRight * rotatedPos.x + camUp * rotatedPos.y;
         vWorldPos = worldPos;
@@ -2649,48 +2874,76 @@ export function buildDragonWorld(
       uniform vec3 uSunDir;
       uniform float uStormFactor;
       uniform float uLightning;
+      uniform float uVolcanicLightning;
       varying vec2 vUv;
       varying vec4 vSeed;
       varying vec3 vWorldPos;
       varying float vViewDist;
+      varying float vVolcanic;
+      varying vec2 vSunUvDir;
 
       void main() {
         vec2 centered = vUv - 0.5;
         float r2 = dot(centered, centered) * 4.0;
         if (r2 >= 1.0) discard;
 
-        // Multi-octave animated wispy drift inside cloud volume
-        vec2 flowUv = vUv + vec2(uTime * 0.008 + vSeed.z, uTime * 0.004 - vSeed.z * 0.5);
+        // Multi-octave animated wispy curl drift + directional self-shadow march toward the Sun
+        vec2 flowUv = vUv + vec2(uTime * (0.008 + vVolcanic * 0.014) + vSeed.z, uTime * 0.004 - vSeed.z * 0.5);
         vec4 texA = texture2D(uCloudTex, vUv);
-        vec4 texB = texture2D(uCloudTex, flowUv * 1.45);
+        vec4 texB = texture2D(uCloudTex, flowUv * 1.55);
+        vec4 texSun1 = texture2D(uCloudTex, clamp(vUv + vSunUvDir * 0.055, 0.02, 0.98));
+        vec4 texSun2 = texture2D(uCloudTex, clamp(vUv + vSunUvDir * 0.115, 0.02, 0.98));
 
-        float wisp = mix(texA.a, texB.g * texA.z, 0.24);
-        float radialSoft = 1.0 - smoothstep(0.45, 1.0, r2);
-        float alpha = clamp(wisp * radialSoft * 0.92, 0.0, 0.86);
-        if (alpha < 0.015) discard;
+        // Eroded wispy silhouette with crisp cauliflower billow core
+        float erodedAlpha = texA.a - (1.0 - texB.g) * mix(0.18, 0.1, vVolcanic) * (1.0 - texA.b);
+        float radialSoft = 1.0 - smoothstep(mix(0.42, 0.32, vVolcanic), 1.0, r2);
+        float densityGain = mix(1.06, 1.54, vVolcanic);
+        float maxOpacity = mix(0.92, 0.98, vVolcanic);
+        float alpha = clamp(erodedAlpha * radialSoft * densityGain, 0.0, maxOpacity);
+        if (alpha < 0.014) discard;
 
-        // UE5 Volumetric Powder & Henyey-Greenstein Sun Scattering
+        // Beer-Lambert volumetric self-shadowing + Powder edge brightening
+        float sunOccl = (texSun1.b * 0.6 + texSun2.b * 0.4);
+        float beerShadow = exp(-sunOccl * mix(1.65, 2.35, uStormFactor + vVolcanic * 0.4));
+        float powder = 1.0 - exp(-texA.b * 2.4);
+        float directSun = clamp(mix(beerShadow, beerShadow * powder * 1.38, 0.55) + (texA.r - texSun1.r) * 0.48, 0.0, 1.35);
+
+        // Dual-lobe Henyey-Greenstein atmospheric sun scattering (forward silver lining + soft warm bounce)
         vec3 viewDir = normalize(vWorldPos - cameraPosition);
-        float sunForward = max(dot(viewDir, uSunDir), 0.0);
-        float silverLining = pow(sunForward, 5.0) * (1.0 - uStormFactor * 0.72) * (1.0 - texA.r * 0.5);
+        float cosTheta = dot(viewDir, uSunDir);
+        float g1 = 0.72;
+        float hgFwd = (1.0 - g1 * g1) / (4.0 * 3.14159 * pow(max(0.08, 1.0 + g1 * g1 - 2.0 * g1 * cosTheta), 1.5));
+        float silverLining = clamp(hgFwd * 0.36, 0.0, 1.4) * (1.0 - uStormFactor * 0.72) * (1.0 - texA.b * 0.42) * (1.0 - vVolcanic * 0.78);
 
-        float crownShade = clamp(vSeed.y * 0.65 + (vUv.y) * 0.35 + texA.r * 0.22, 0.0, 1.0);
-        vec3 clearTop = vec3(1.0, 0.96, 0.90);
-        vec3 clearBelly = vec3(0.50, 0.60, 0.72);
+        float crownShade = clamp(vSeed.y * 0.52 + vUv.y * 0.24 + directSun * 0.42 + texA.r * 0.14, 0.0, 1.0);
+        vec3 clearTop = vec3(1.0, 0.97, 0.92);
+        vec3 clearBelly = vec3(0.44, 0.56, 0.70);
         vec3 stormTop = vec3(0.32, 0.38, 0.45);
-        vec3 stormBelly = vec3(0.11, 0.14, 0.19);
+        vec3 stormBelly = vec3(0.10, 0.13, 0.18);
+        vec3 volcTop = vec3(0.19, 0.15, 0.17);
+        vec3 volcBelly = vec3(0.05, 0.04, 0.05);
 
-        vec3 topCol = mix(clearTop, stormTop, uStormFactor);
-        vec3 bellyCol = mix(clearBelly, stormBelly, uStormFactor);
-        vec3 col = mix(bellyCol, topCol, smoothstep(0.12, 0.92, crownShade));
+        vec3 topCol = mix(mix(clearTop, stormTop, uStormFactor), volcTop, vVolcanic);
+        vec3 bellyCol = mix(mix(clearBelly, stormBelly, uStormFactor), volcBelly, vVolcanic);
+        vec3 col = mix(bellyCol, topCol, smoothstep(0.08, 0.94, crownShade));
 
-        // Warm golden rim scattering & storm lightning subsurface glow
-        col += vec3(1.0, 0.82, 0.58) * silverLining * 0.72;
-        col += vec3(0.62, 0.84, 1.0) * uLightning * (0.35 + (1.0 - texA.r) * 0.65);
+        // Warm golden rim scattering & sunlit dome highlights
+        col += vec3(1.0, 0.85, 0.62) * silverLining * 0.68;
+        col += vec3(0.22, 0.18, 0.14) * max(0.0, directSun - 0.65) * (1.0 - uStormFactor * 0.8) * (1.0 - vVolcanic);
 
-        // Smooth near-camera soft dissolve & horizon aerial fade
+        // Caldera magma underglow inside lower volcanic ash plumes
+        float magmaMask = (1.0 - smoothstep(0.06, 0.74, crownShade)) * (0.62 + 0.38 * sin(uTime * 2.1 + vSeed.w));
+        col += vec3(0.96, 0.33, 0.05) * magmaMask * (0.45 + 0.32 * (1.0 - texA.r)) * vVolcanic;
+
+        // Global storm lightning + localized volcanic dirty-thunderstorm subsurface arcs
+        float localFlash = max(uLightning, uVolcanicLightning * vVolcanic);
+        vec3 lightningTint = mix(vec3(0.62, 0.84, 1.0), vec3(0.76, 0.90, 1.0), vVolcanic);
+        col += lightningTint * localFlash * (0.35 + (1.0 - texA.r) * 0.65 + vVolcanic * 0.32);
+        col += vec3(1.0, 0.52, 0.18) * uVolcanicLightning * vVolcanic * (1.0 - crownShade) * 0.42;
+
+        // Smooth near-camera soft dissolve & wide high-altitude horizon fade
         float nearFade = smoothstep(8.0, 34.0, vViewDist);
-        float farFade = 1.0 - smoothstep(3200.0, 5600.0, vViewDist);
+        float farFade = 1.0 - smoothstep(4200.0, 7600.0, vViewDist);
         alpha *= nearFade * farFade;
 
         gl_FragColor = vec4(col, alpha);
@@ -2723,7 +2976,7 @@ export function buildDragonWorld(
     banners: allBanners,
     sanctuaryBeacon,
     sanctuaryRing,
-    sanctuaryDragonPerch: new THREE.Vector3(-640, sanctuaryY + 4.4, 580),
+    sanctuaryDragonPerch: new THREE.Vector3(-640, sanctuaryY + 6.8, 580),
     hideSoldiersForBuilding,
     getWalkableGroundHeight,
     updateCitizens,

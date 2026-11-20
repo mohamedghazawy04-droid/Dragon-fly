@@ -100,6 +100,12 @@ const INITIAL_HUD: HudState = {
   cameraView: 'full',
   isLooping: false,
   knifeEdgeSide: 0,
+  maneuverKind: 'none',
+  maneuverSide: 0,
+  maneuverIntensity: 0,
+  bankAngleDeg: 0,
+  motionBlurIntensity: 0,
+  isBoosting: false,
   nearLandedDragon: false,
   isInWater: false,
   warType: 'both',
@@ -115,6 +121,7 @@ const INITIAL_HUD: HudState = {
   activeLoreTaleId: null,
   activeLoreSegment: 0,
   isLorePlaying: false,
+  knightSpeechText: null,
 };
 
 export default function App() {
@@ -291,6 +298,20 @@ export default function App() {
           onStopTale={() => engineRef.current?.stopLoreTale()}
           onClose={() => setShowLoreModal(false)}
         />
+      )}
+
+      {/* Classical Arabic Spoken Dialogue Overlay in Bright Orange Font */}
+      {hud.knightSpeechText && (
+        <div
+          dir="rtl"
+          className="pointer-events-none select-none fixed inset-x-0 bottom-20 sm:bottom-24 z-40 flex justify-center px-4"
+        >
+          <div className="max-w-2xl bg-gradient-to-r from-transparent via-slate-950/80 to-transparent px-8 sm:px-12 py-2.5 text-center">
+            <p className="font-display text-lg sm:text-2xl md:text-[26px] font-bold leading-relaxed text-[#ff8c24] drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]">
+              « {hud.knightSpeechText} »
+            </p>
+          </div>
+        </div>
       )}
     </main>
   );

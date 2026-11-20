@@ -8,20 +8,50 @@ export type KnightVoiceCategory =
   | 'battle_cry'
   | 'sword_kill'
   | 'danger'
+  | 'landing'
   | 'victory';
 
 const KNIGHT_VOICE_LINES: Record<KnightVoiceCategory, string[]> = {
-  takeoff: ['هيا بنا صغيري!', 'فلنحلق بقوة!'],
-  boost: ['فلنحلق بقوة!', 'هيا بنا صغيري!'],
-  combat_start: ['لنرى ما يمكن أن نفعله!', 'فلنحلق بقوة!', 'هيا بنا صغيري!'],
+  takeoff: [
+    'هيا بنا صغيري!',
+    'فلنحلق بقوة في عنان السماء!',
+    'إلى الأعالي يا رفيق الدرب!',
+  ],
+  boost: [
+    'فلنحلق بقوة!',
+    'شقّ السحاب يا صغيري!',
+    'انطلق كالشهاب المشتعل!',
+  ],
+  combat_start: [
+    'لنرى ما يمكن أن نفعله!',
+    'فلنحلق بقوة نحو النصر!',
+    'هيا بنا صغيري، قد حان النزال!',
+  ],
   battle_cry: [
     'الله أكبر!',
     'كما قال غزاوي، يجب أن نقص الرؤوس!',
     'لنرى ما يمكن أن نفعله!',
+    'اثبت في السماء ولا تتراجع!',
   ],
-  sword_kill: ['الله أكبر!', 'كما قال غزاوي، يجب أن نقص الرؤوس!'],
-  danger: ['يجب أن ندافع عن أميرنا!', 'الله أكبر!'],
-  victory: ['الله أكبر!', 'هيا بنا صغيري!'],
+  sword_kill: [
+    'الله أكبر!',
+    'كما قال غزاوي، يجب أن نقص الرؤوس!',
+    'سقط الخصم بحدّ الحسام!',
+  ],
+  danger: [
+    'يجب أن ندافع عن أميرنا!',
+    'الله أكبر، احذر من الهجوم القادم!',
+    'ثبتوا الصفوف، قد أُعلن النفير!',
+  ],
+  landing: [
+    'اهبط برفق على ثرى الأرض يا صغيري!',
+    'وقوفٌ راسخٌ على القدمين، أحسنتَ يا رفيقي!',
+  ],
+  victory: [
+    'الله أكبر، قد تمّ النصر!',
+    'هيا بنا صغيري، إنّ السماء لنا!',
+    'عاش أميرنا وفرسان التنانين!',
+  ],
 };
 
 export class DragonAudio {
@@ -38,11 +68,13 @@ export class DragonAudio {
   private muted = false;
   private initialized = false;
   private lastBreathSound = 0;
+  private lastMovementRoar = 0;
   private lastImpactSound = 0;
   private lastHornSound = 0;
   private lastVoiceTime = 0;
   private voiceLineIndex = 0;
   private preferredArabicVoice: SpeechSynthesisVoice | null = null;
+  private onSpeechCallback: ((text: string) => void) | null = null;
   private loreSessionId = 0;
   private loreTimerId: number | null = null;
   private loreChordTimerId: number | null = null;
@@ -584,42 +616,58 @@ export class DragonAudio {
   }
 
   /**
-   * Realistic biological dragon roar with laryngeal formants + raspy breathy snarl.
+   * Realistic biological dragon roar with sub-bass chest rumble, laryngeal formants + raspy breathy snarl.
    */
-  public playRoar(element: ElementType): void {
+  public playRoar(element: ElementType, volumeScale = 1.0, durationScale = 1.0): void {
     if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
     const now = this.ctx.currentTime;
     const base = element === 'ice' ? 145 : element === 'rock' ? 78 : 108;
+    const dur = 0.9 * Math.max(0.55, durationScale);
+    const vol = Math.min(1.25, Math.max(0.2, volumeScale));
 
     const osc1 = this.ctx.createOscillator();
     const osc2 = this.ctx.createOscillator();
+    const subChest = this.ctx.createOscillator();
     const formant = this.ctx.createBiquadFilter();
     const gain = this.ctx.createGain();
+    const subGain = this.ctx.createGain();
 
     osc1.type = 'sawtooth';
     osc2.type = 'sawtooth';
+    subChest.type = 'triangle';
     osc1.frequency.setValueAtTime(base * 1.15, now);
-    osc1.frequency.exponentialRampToValueAtTime(base * 0.58, now + 0.85);
-    osc2.frequency.setValueAtTime(base * 1.18, now);
-    osc2.frequency.exponentialRampToValueAtTime(base * 0.61, now + 0.85);
+    osc1.frequency.exponentialRampToValueAtTime(base * 0.56, now + dur * 0.95);
+    osc2.frequency.setValueAtTime(base * 1.19, now);
+    osc2.frequency.exponentialRampToValueAtTime(base * 0.6, now + dur * 0.95);
+    subChest.frequency.setValueAtTime(base * 0.58, now);
+    subChest.frequency.exponentialRampToValueAtTime(base * 0.34, now + dur * 0.95);
 
     formant.type = 'bandpass';
-    formant.Q.value = 2.1;
-    formant.frequency.setValueAtTime(640, now);
-    formant.frequency.exponentialRampToValueAtTime(220, now + 0.85);
+    formant.Q.value = 2.0;
+    formant.frequency.setValueAtTime(660, now);
+    formant.frequency.exponentialRampToValueAtTime(215, now + dur * 0.95);
 
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.32, now + 0.08);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    gain.gain.linearRampToValueAtTime(0.34 * vol, now + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    subGain.gain.setValueAtTime(0.001, now);
+    subGain.gain.linearRampToValueAtTime(0.18 * vol, now + 0.06);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
 
     osc1.connect(formant);
     osc2.connect(formant);
     formant.connect(gain);
     gain.connect(this.masterGain);
+    subChest.connect(subGain);
+    subGain.connect(this.masterGain);
+
     osc1.start(now);
     osc2.start(now);
-    osc1.stop(now + 0.92);
-    osc2.stop(now + 0.92);
+    subChest.start(now);
+    osc1.stop(now + dur + 0.04);
+    osc2.stop(now + dur + 0.04);
+    subChest.stop(now + dur + 0.04);
 
     // Breathy reptilian hiss layered on top
     const snarl = this.ctx.createBufferSource();
@@ -627,19 +675,30 @@ export class DragonAudio {
     const sFilter = this.ctx.createBiquadFilter();
     sFilter.type = 'bandpass';
     sFilter.Q.value = 1.4;
-    sFilter.frequency.setValueAtTime(920, now);
-    sFilter.frequency.exponentialRampToValueAtTime(340, now + 0.82);
+    sFilter.frequency.setValueAtTime(940, now);
+    sFilter.frequency.exponentialRampToValueAtTime(320, now + dur * 0.92);
 
     const sGain = this.ctx.createGain();
     sGain.gain.setValueAtTime(0.001, now);
-    sGain.gain.linearRampToValueAtTime(0.24, now + 0.07);
-    sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
+    sGain.gain.linearRampToValueAtTime(0.24 * vol, now + 0.07);
+    sGain.gain.exponentialRampToValueAtTime(0.001, now + dur * 0.95);
 
     snarl.connect(sFilter);
     sFilter.connect(sGain);
     sGain.connect(this.masterGain);
     snarl.start(now);
-    snarl.stop(now + 0.88);
+    snarl.stop(now + dur);
+  }
+
+  /**
+   * Expressive mid-flight dragon growl/roar triggered while soaring, boosting, or diving.
+   */
+  public playMovementRoar(element: ElementType, intensity = 0.65): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+    if (now - this.lastMovementRoar < 2.6) return;
+    this.lastMovementRoar = now;
+    this.playRoar(element, 0.42 + intensity * 0.42, 0.78 + intensity * 0.28);
   }
 
   public playSwordSlash(): void {
@@ -855,11 +914,15 @@ export class DragonAudio {
     return exact;
   }
 
+  public setOnSpeech(cb: ((text: string) => void) | null): void {
+    this.onSpeechCallback = cb;
+  }
+
   /**
-   * Speaks Classical Arabic heroic battle lines for the Dragon Knight using Web Speech Synthesis.
+   * Speaks Classical Arabic heroic battle lines for the Dragon Knight using Web Speech Synthesis
+   * and emits the Classical Arabic text to be displayed on screen in orange typography.
    */
   public speakKnight(category: KnightVoiceCategory, force = false): void {
-    if (this.muted || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
     const nowMs = performance.now();
     if (!force && nowMs - this.lastVoiceTime < 4600) return;
     if (force && nowMs - this.lastVoiceTime < 1400) return;
@@ -868,6 +931,10 @@ export class DragonAudio {
     const pool = KNIGHT_VOICE_LINES[category];
     const line = pool[this.voiceLineIndex % pool.length];
     this.voiceLineIndex += 1;
+
+    this.onSpeechCallback?.(line);
+
+    if (this.muted || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
 
     try {
       const synth = window.speechSynthesis;

@@ -15,6 +15,7 @@ import {
 } from './dragonMesh';
 import {
   createImpactScarTexture,
+  createRealisticSmokeTexture,
   createShockwaveRingTexture,
   createSoftParticleTexture,
 } from './textures';
@@ -31,6 +32,7 @@ import {
   GamePhase,
   HudState,
   KnightUpgradeKey,
+  ManeuverKind,
   ProgressionState,
   UPGRADE_MAX_LEVEL,
   WarStatus,
@@ -75,6 +77,7 @@ const _eulerA = new THREE.Euler(0, 0, 0, 'YXZ');
 const _fogColorClear = new THREE.Color(0xc99c6e);
 const _fogColorRain = new THREE.Color(0x455669);
 const _fogColorStorm = new THREE.Color(0x19232e);
+const _fogColorVolcanic = new THREE.Color(0x281915);
 const _fogColorFlash = new THREE.Color(0x7ca7cc);
 const _sunColorClear = new THREE.Color(0xffcfa0);
 const _sunColorStorm = new THREE.Color(0x3a4f66);
@@ -83,6 +86,7 @@ const _hemiSkyStorm = new THREE.Color(0x28374a);
 const _hemiGndClear = new THREE.Color(0x1d241b);
 const _hemiGndStorm = new THREE.Color(0x10161a);
 const _shipCharColor = new THREE.Color(0x160f0b);
+const _lightningDir = new THREE.Vector3();
 
 interface Projectile {
   mesh: THREE.Mesh;
@@ -103,6 +107,83 @@ interface ParticleItem {
   startScale: number;
   endScale: number;
   gravity: number;
+}
+
+const MAX_SMOKE = 560;
+const _smokeColorTmp = new THREE.Color();
+
+const MAX_ELEM_PARTICLES = 900;
+const _elemColorA = new THREE.Color();
+const _elemColorB = new THREE.Color();
+const _burstNorm = new THREE.Vector3();
+const _burstTanA = new THREE.Vector3();
+const _burstTanB = new THREE.Vector3();
+const _burstDir = new THREE.Vector3();
+
+const MAX_WATER_WAKES = 160;
+
+interface WaterWakeDecal {
+  active: boolean;
+  x: number;
+  z: number;
+  vx: number;
+  vz: number;
+  life: number;
+  maxLife: number;
+  startScale: number;
+  endScale: number;
+  angle: number;
+  angVel: number;
+  kind: number; // 0 = expanding concentric wave ring, 1 = swirling spiral water vortex, 2 = frothy wake streak
+  spin: number; // +1 or -1 vortex direction
+}
+
+interface ElemParticle {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  r0: number;
+  g0: number;
+  b0: number;
+  r1: number;
+  g1: number;
+  b1: number;
+  life: number;
+  maxLife: number;
+  startScale: number;
+  endScale: number;
+  gravity: number;
+  drag: number;
+  angle: number;
+  angVel: number;
+  kind: number;
+}
+
+interface SmokePuff {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  r: number;
+  g: number;
+  b: number;
+  life: number;
+  maxLife: number;
+  startScale: number;
+  endScale: number;
+  buoyancy: number;
+  fireGlow: number;
+  windMul: number;
+  angle: number;
+  angVel: number;
+  seed: number;
 }
 
 type DebrisKind =
@@ -207,6 +288,9 @@ const UE5FilmicPostShader = {
     tDiffuse: { value: null },
     vignetteStrength: { value: 0.24 },
     contrastBoost: { value: 1.07 },
+    motionBlur: { value: 0.0 },
+    boostFactor: { value: 0.0 },
+    steerSmear: { value: 0.0 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -219,16 +303,50 @@ const UE5FilmicPostShader = {
     uniform sampler2D tDiffuse;
     uniform float vignetteStrength;
     uniform float contrastBoost;
+    uniform float motionBlur;
+    uniform float boostFactor;
+    uniform float steerSmear;
     varying vec2 vUv;
     void main() {
-      vec4 tex = texture2D(tDiffuse, vUv);
-      vec3 col = tex.rgb;
-      col = clamp((col - 0.5) * contrastBoost + 0.5, 0.0, 1.0);
       vec2 center = vUv - 0.5;
+      float rad = length(center);
+      vec4 centerTex = texture2D(tDiffuse, vUv);
+      vec3 col = centerTex.rgb;
+
+      if (motionBlur > 0.004) {
+        // Keep central focal zone razor-sharp around dragon & reticle while edges streak with speed
+        float edgeMask = smoothstep(0.11, 0.56, rad);
+        float blurAmt = motionBlur * edgeMask * (0.022 + 0.018 * boostFactor);
+        vec2 radialDir = rad > 0.0001 ? (center / rad) : vec2(0.0);
+        vec2 tangDir = vec2(-radialDir.y, radialDir.x) * (steerSmear * 0.34);
+        vec2 stepVec = (radialDir * (0.45 + rad * 1.15) + tangDir) * blurAmt;
+
+        vec3 acc = vec3(0.0);
+        float totalW = 0.0;
+        for (int i = 0; i < 10; i++) {
+          float fi = float(i) / 9.0;
+          float w = 1.0 - fi * 0.52;
+          vec2 sampleUv = clamp(vUv - stepVec * fi, vec2(0.001), vec2(0.999));
+          acc += texture2D(tDiffuse, sampleUv).rgb * w;
+          totalW += w;
+        }
+        col = acc / totalW;
+
+        // Subtle peripheral chromatic velocity fringe during boost & Mach dives
+        float chroma = edgeMask * motionBlur * (0.0014 + 0.0024 * boostFactor);
+        if (chroma > 0.0002) {
+          float rCh = texture2D(tDiffuse, clamp(vUv - stepVec * 0.45 - radialDir * chroma, vec2(0.001), vec2(0.999))).r;
+          float bCh = texture2D(tDiffuse, clamp(vUv - stepVec * 0.15 + radialDir * chroma, vec2(0.001), vec2(0.999))).b;
+          col.r = mix(col.r, rCh, 0.48);
+          col.b = mix(col.b, bCh, 0.48);
+        }
+      }
+
+      col = clamp((col - 0.5) * contrastBoost + 0.5, 0.0, 1.0);
       float dist = dot(center, center);
       float vig = 1.0 - smoothstep(0.18, 0.78, dist) * vignetteStrength;
       col *= vig;
-      gl_FragColor = vec4(col, tex.a);
+      gl_FragColor = vec4(col, centerTex.a);
     }
   `,
 };
@@ -264,6 +382,7 @@ interface AiDragon {
   roostState: 'flying' | 'approaching_roost' | 'hanging';
   roostIndex: number;
   roostTimer: number;
+  clashTimer: number;
 }
 
 export class DragonEngine {
@@ -272,6 +391,7 @@ export class DragonEngine {
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private fxaaPass: FXAAPass | null = null;
+  private filmicPass: ShaderPass | null = null;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private isSoftwareGl: boolean;
@@ -306,7 +426,18 @@ export class DragonEngine {
   private playerCrashing = false;
   private playerCrashTimer = 0;
   private knifeEdgeSide: -1 | 0 | 1 = 0;
+  private prevTurnInput = 0;
+  private maneuverKind: ManeuverKind = 'none';
+  private maneuverSide: -1 | 0 | 1 = 0;
+  private maneuverIntensity = 0;
+  private maneuverFlashTimer = 0;
   private landingRequested = false;
+  private diveTuckFactor = 0;
+  private landingLegExtend = 0;
+  private talonClashTimer = 0;
+  private talonClashCooldown = 0;
+  private movementRoarTimer = 3.2;
+  private wasBoosting = false;
 
   // Skydiving & On-Foot Knight Exploration state
   private activeRiderRig!: ArticulatedRiderRig;
@@ -404,7 +535,63 @@ export class DragonEngine {
   private hudEmitTimer = 0;
   private toastMessage: string | null = null;
   private toastTimer = 0;
+  private knightSpeechText: string | null = null;
+  private knightSpeechTimer = 0;
   private sanctuaryOrbitAngle = 0.6;
+  private motionBlurIntensity = 0;
+  private boostVisualFactor = 0;
+  private speedStreakLines!: THREE.LineSegments;
+  private speedStreakMat!: THREE.LineBasicMaterial;
+  private speedStreakSeeds!: Float32Array;
+  private readonly speedStreakCount = 72;
+
+  // Single-draw-call Instanced Volumetric Smoke System
+  private smokePool: SmokePuff[] = [];
+  private smokeCursor = 0;
+  private smokeTex!: THREE.DataTexture;
+  private smokeGeo!: THREE.InstancedBufferGeometry;
+  private smokeMat!: THREE.ShaderMaterial;
+  private smokeMesh!: THREE.Mesh;
+  private smokePosScaleArr = new Float32Array(MAX_SMOKE * 4);
+  private smokeTintArr = new Float32Array(MAX_SMOKE * 3);
+  private smokeParamsArr = new Float32Array(MAX_SMOKE * 4);
+  private smokePosScaleAttr!: THREE.InstancedBufferAttribute;
+  private smokeTintAttr!: THREE.InstancedBufferAttribute;
+  private smokeParamsAttr!: THREE.InstancedBufferAttribute;
+  private volcanoPlumeTimer = 0;
+
+  // Single-draw-call GPU-Instanced Advanced Elemental Impact Particle System
+  private elemPool: ElemParticle[] = [];
+  private elemCursor = 0;
+  private elemGeo!: THREE.InstancedBufferGeometry;
+  private elemMat!: THREE.ShaderMaterial;
+  private elemMesh!: THREE.Mesh;
+  private elemPosScaleArr = new Float32Array(MAX_ELEM_PARTICLES * 4);
+  private elemCol0Arr = new Float32Array(MAX_ELEM_PARTICLES * 3);
+  private elemCol1Arr = new Float32Array(MAX_ELEM_PARTICLES * 3);
+  private elemParamsArr = new Float32Array(MAX_ELEM_PARTICLES * 4);
+  private elemPosScaleAttr!: THREE.InstancedBufferAttribute;
+  private elemCol0Attr!: THREE.InstancedBufferAttribute;
+  private elemCol1Attr!: THREE.InstancedBufferAttribute;
+  private elemParamsAttr!: THREE.InstancedBufferAttribute;
+  private breathImpactVfxTimer = 0;
+
+  // Single-draw-call GPU-Instanced Water Vortices, Expanding Waves & Wake Trail System
+  private waterWakePool: WaterWakeDecal[] = [];
+  private waterWakeCursor = 0;
+  private waterWakeGeo!: THREE.InstancedBufferGeometry;
+  private waterWakeMat!: THREE.ShaderMaterial;
+  private waterWakeMesh!: THREE.Mesh;
+  private waterWakePosScaleArr = new Float32Array(MAX_WATER_WAKES * 4);
+  private waterWakeParamsArr = new Float32Array(MAX_WATER_WAKES * 4);
+  private waterWakePosScaleAttr!: THREE.InstancedBufferAttribute;
+  private waterWakeParamsAttr!: THREE.InstancedBufferAttribute;
+  private oceanWakeIntensity = 0;
+  private oceanWakePosXZ = new THREE.Vector2();
+  private oceanWakeDirXZ = new THREE.Vector2(0, -1);
+  private wakeTrailCursor = 0;
+  private wakeTrailDropTimer = 0;
+  private wakeVortexSpawnTimer = 0;
 
   // Dynamic Weather, Cinematic Rim/Bounce & Breath Lighting Rig
   private hemiLight: THREE.HemisphereLight;
@@ -426,6 +613,10 @@ export class DragonEngine {
   private stormIntensity = 0;
   private lightningPower = 0;
   private nextLightningTimer = 3.2;
+  private volcanicZoneFactor = 0;
+  private volcanicLightningPower = 0;
+  private nextVolcanicLightningTimer = 1.4;
+  private lightningOrigin = new THREE.Vector3(120, 220, -180);
   private lastReflectionStormBand = 0;
 
   private rainLines!: THREE.LineSegments;
@@ -541,7 +732,7 @@ export class DragonEngine {
     this.scene.background = new THREE.Color(0xc99c6e);
     this.scene.fog = new THREE.FogExp2(0xc99c6e, 0.00021);
 
-    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.4, 6600);
+    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.4, 9400);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     const skyEnvScene = new THREE.Scene();
@@ -634,11 +825,19 @@ export class DragonEngine {
 
     this.createWeatherSystems();
 
-    // 5. World & Textures
+    // 5. World, Volumetric Smoke & Textures
     this.particleTex = createSoftParticleTexture();
     this.scarTex = createImpactScarTexture(this.maxAnisotropy);
     this.shockRingTex = createShockwaveRingTexture();
     this.world = buildDragonWorld(this.scene, this.maxAnisotropy);
+    this.initSmokeSystem();
+    this.initElemParticleSystem();
+    this.initWaterWakeSystem();
+    this.audio.setOnSpeech((text) => {
+      this.knightSpeechText = text;
+      this.knightSpeechTimer = 4.2;
+      this.emitHud();
+    });
 
     // Capture initial Sky, Sun, Castles, and Mountains into Ocean Reflection CubeMap
     this.updateOceanReflection();
@@ -670,7 +869,8 @@ export class DragonEngine {
       this.fxaaPass = new FXAAPass();
       this.fxaaPass.setSize(w, h);
       this.composer.addPass(this.fxaaPass);
-      this.composer.addPass(new ShaderPass(UE5FilmicPostShader));
+      this.filmicPass = new ShaderPass(UE5FilmicPostShader);
+      this.composer.addPass(this.filmicPass);
       this.renderer.compile(this.scene, this.camera);
     }
 
@@ -723,6 +923,29 @@ export class DragonEngine {
     this.lightningBolt.frustumCulled = false;
     this.lightningBolt.visible = false;
     this.scene.add(this.lightningBolt);
+
+    // 3. 3D Camera-Cone Hyper-Speed Wind Streaks (Boost & High-Speed Flight)
+    const streakPositions = new Float32Array(this.speedStreakCount * 2 * 3);
+    this.speedStreakSeeds = new Float32Array(this.speedStreakCount * 4);
+    for (let i = 0; i < this.speedStreakCount; i++) {
+      this.speedStreakSeeds[i * 4] = (i / this.speedStreakCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.14;
+      this.speedStreakSeeds[i * 4 + 1] = 8.5 + Math.random() * 14.5; // radial ring radius
+      this.speedStreakSeeds[i * 4 + 2] = Math.random(); // depth phase 0..1
+      this.speedStreakSeeds[i * 4 + 3] = 0.78 + Math.random() * 0.55; // speed multiplier
+    }
+    const streakGeo = new THREE.BufferGeometry();
+    streakGeo.setAttribute('position', new THREE.BufferAttribute(streakPositions, 3));
+    this.speedStreakMat = new THREE.LineBasicMaterial({
+      color: 0xeaf6ff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.speedStreakLines = new THREE.LineSegments(streakGeo, this.speedStreakMat);
+    this.speedStreakLines.frustumCulled = false;
+    this.speedStreakLines.visible = false;
+    this.scene.add(this.speedStreakLines);
   }
 
   private updateOceanReflection(): void {
@@ -806,6 +1029,7 @@ export class DragonEngine {
         roostState: 'flying',
         roostIndex: idx % roostLen,
         roostTimer: 6 + idx * 3.5,
+        clashTimer: 0,
       });
     });
   }
@@ -1186,6 +1410,12 @@ export class DragonEngine {
       this.activeLoreTaleId = activeId;
       this.activeLoreSegment = segIdx;
       this.isLorePlaying = playing;
+      if (playing && tale.segments[segIdx]) {
+        this.knightSpeechText = tale.segments[segIdx];
+        this.knightSpeechTimer = 11.5;
+      } else if (!playing) {
+        this.knightSpeechTimer = Math.min(this.knightSpeechTimer, 1.5);
+      }
       this.emitHud();
     });
   }
@@ -1193,6 +1423,8 @@ export class DragonEngine {
   public stopLoreTale(): void {
     this.audio.stopLoreTale();
     this.isLorePlaying = false;
+    this.knightSpeechText = null;
+    this.knightSpeechTimer = 0;
     this.emitHud();
   }
 
@@ -1288,6 +1520,10 @@ export class DragonEngine {
     if (this.phase !== 'flying' || this.halfLoopRemaining > 0.05) return;
     this.audio.init();
     this.halfLoopRemaining = Math.PI;
+    this.maneuverKind = 'half_loop';
+    this.maneuverSide = 0;
+    this.maneuverIntensity = 1;
+    this.maneuverFlashTimer = 0.48;
     this.audio.playWingbeat();
     this.audio.speakKnight('boost');
     this.emitHud();
@@ -1298,10 +1534,23 @@ export class DragonEngine {
     this.audio.init();
     if (this.knifeEdgeSide !== 0) {
       this.knifeEdgeSide = 0;
+      this.maneuverFlashTimer = 0.16;
     } else {
       const turnLeft =
         this.keys['KeyA'] || this.keys['ArrowLeft'] || this.manualSteerX < -0.2;
-      this.knifeEdgeSide = turnLeft ? -1 : 1;
+      const turnRight =
+        this.keys['KeyD'] || this.keys['ArrowRight'] || this.manualSteerX > 0.2;
+      if (turnLeft) {
+        this.knifeEdgeSide = 1; // +90 deg Z roll -> left wing down / banking left
+      } else if (turnRight) {
+        this.knifeEdgeSide = -1; // -90 deg Z roll -> right wing down / banking right
+      } else {
+        this.knifeEdgeSide = this.playerRoll >= 0 ? 1 : -1;
+      }
+      this.maneuverKind = 'knife_edge';
+      this.maneuverSide = this.knifeEdgeSide > 0 ? -1 : 1;
+      this.maneuverIntensity = 0.92;
+      this.maneuverFlashTimer = 0.45;
     }
     this.audio.playWingbeat();
     this.emitHud();
@@ -1311,6 +1560,10 @@ export class DragonEngine {
     if (this.phase !== 'flying' || this.playerCrashing) return;
     this.audio.init();
     this.knifeEdgeSide = 0;
+    this.maneuverKind = 'none';
+    this.maneuverSide = 0;
+    this.maneuverIntensity = 0;
+    this.maneuverFlashTimer = 0;
     this.landingRequested = false;
     this.isFiring = false;
     this.isBoosting = false;
@@ -1359,6 +1612,10 @@ export class DragonEngine {
     this.audio.init();
     this.knifeEdgeSide = 0;
     this.halfLoopRemaining = 0;
+    this.maneuverKind = 'none';
+    this.maneuverSide = 0;
+    this.maneuverIntensity = 0;
+    this.maneuverFlashTimer = 0;
     this.isFiring = false;
     this.landingRequested = !this.landingRequested;
     this.audio.playWingbeat();
@@ -1395,6 +1652,8 @@ export class DragonEngine {
     this.playerRig.bodyGroup.position.set(0, 0, 0);
     this.playerRig.bodyGroup.rotation.set(0, 0, 0);
     this.playerRig.headGroup.rotation.set(0, 0, 0);
+    this.playerRig.leftHindFoot.rotation.set(0, 0, 0);
+    this.playerRig.rightHindFoot.rotation.set(0, 0, 0);
     this.playerPos.set(lx, launchY, lz);
     this.setFlightEuler(0.18, yaw);
     this.playerSpeed = spec.baseSpeed * 0.85;
@@ -1408,18 +1667,20 @@ export class DragonEngine {
     // Takeoff dust scatter beneath wings
     for (let i = 0; i < 16; i++) {
       const a = (i / 16) * Math.PI * 2;
-      this.spawnParticle(
-        lx + Math.cos(a) * 3,
-        launchY - 4,
-        lz + Math.sin(a) * 3,
+      this.spawnSmoke(
+        lx + Math.cos(a) * 3.5,
+        launchY - 4.0,
+        lz + Math.sin(a) * 3.5,
         Math.cos(a) * 18,
-        3 + Math.random() * 6,
+        2.5 + Math.random() * 5.5,
         Math.sin(a) * 18,
-        0xa89274,
-        0.9,
-        2.4,
-        7.5,
-        3,
+        0x9a8568,
+        1.15,
+        2.8,
+        9.6,
+        1.8,
+        0,
+        0.5,
       );
     }
     this.audio.playWingbeat();
@@ -1437,6 +1698,10 @@ export class DragonEngine {
     this.playerCrashing = false;
     this.playerCrashTimer = 0;
     this.knifeEdgeSide = 0;
+    this.maneuverKind = 'none';
+    this.maneuverSide = 0;
+    this.maneuverIntensity = 0;
+    this.maneuverFlashTimer = 0;
     this.landingRequested = false;
     this.activeRiderRig.root.visible = false;
     this.phase = 'flying';
@@ -1463,6 +1728,10 @@ export class DragonEngine {
     this.playerCrashing = false;
     this.playerCrashTimer = 0;
     this.knifeEdgeSide = 0;
+    this.maneuverKind = 'none';
+    this.maneuverSide = 0;
+    this.maneuverIntensity = 0;
+    this.maneuverFlashTimer = 0;
     this.landingRequested = false;
     this.activeRiderRig.root.visible = false;
     this.phase = 'resting';
@@ -1893,35 +2162,65 @@ export class DragonEngine {
     this.frameId = window.setTimeout(poll, 5);
   }
 
-  private triggerLightningStrike(): void {
-    this.lightningPower = 1.0;
+  private computeVolcanicZoneFactor(x: number, z: number): number {
+    const dMain = Math.hypot(x + 1520, z + 1500);
+    const dTwin = Math.hypot(x + 1840, z + 1240);
+    const dEmber = Math.hypot(x + 1230, z + 1780);
+    const fMain = 1 - THREE.MathUtils.smoothstep(dMain, 190, 560);
+    const fTwin = 1 - THREE.MathUtils.smoothstep(dTwin, 125, 360);
+    const fEmber = 1 - THREE.MathUtils.smoothstep(dEmber, 120, 355);
+    return Math.max(fMain, fTwin, fEmber);
+  }
+
+  private triggerLightningStrike(isVolcanic = false): void {
+    if (isVolcanic) {
+      this.volcanicLightningPower = 1.0;
+    } else {
+      this.lightningPower = 1.0;
+    }
     this.audio.playThunder();
 
-    // Place bolt in front of the player camera so the strike and its sea reflections are dramatic
-    this.camera.getWorldDirection(_v1);
-    _right.set(-_v1.z, 0, _v1.x).normalize();
-    const dist = 165 + Math.random() * 140;
-    const lateral = (Math.random() - 0.5) * 230;
-    const bx = this.camera.position.x + _v1.x * dist + _right.x * lateral;
-    const bz = this.camera.position.z + _v1.z * dist + _right.z * lateral;
+    const focus =
+      this.phase === 'skydiving' || this.phase === 'on_foot' ? this.riderPos : this.playerPos;
 
-    this.lightningDirLight.position.set(
-      bx - this.camera.position.x,
-      260,
-      bz - this.camera.position.z,
-    );
+    let bx: number;
+    let bz: number;
+    let topY: number;
+    let botY: number;
+
+    if (isVolcanic) {
+      // Dirty-thunderstorm strike erupting inside the dense pyroclastic clouds above the Hidden Volcanic Islands
+      const anchorX = THREE.MathUtils.lerp(-1520, focus.x, 0.55);
+      const anchorZ = THREE.MathUtils.lerp(-1500, focus.z, 0.55);
+      bx = anchorX + (Math.random() - 0.5) * 290;
+      bz = anchorZ + (Math.random() - 0.5) * 290;
+      topY = 235;
+      botY = Math.max(12, getTerrainHeight(bx, bz) - 4);
+      this.lightningOrigin.set(bx, 175, bz);
+    } else {
+      // Place bolt in front of the player camera so the strike and its sea reflections are dramatic
+      this.camera.getWorldDirection(_v1);
+      _right.set(-_v1.z, 0, _v1.x).normalize();
+      const dist = 165 + Math.random() * 140;
+      const lateral = (Math.random() - 0.5) * 230;
+      bx = this.camera.position.x + _v1.x * dist + _right.x * lateral;
+      bz = this.camera.position.z + _v1.z * dist + _right.z * lateral;
+      topY = 215;
+      botY = -2;
+      this.lightningOrigin.set(bx, 165, bz);
+    }
+
+    this.lightningDirLight.position.set(bx - focus.x, 260, bz - focus.z);
 
     const attr = this.lightningBolt.geometry.getAttribute('position') as THREE.BufferAttribute;
-    const topY = 215;
-    const botY = -2;
     let curX = bx;
     let curZ = bz;
     for (let i = 0; i < this.lightningSegments; i++) {
       const t = i / (this.lightningSegments - 1);
       const y = THREE.MathUtils.lerp(topY, botY, t);
       if (i > 0 && i < this.lightningSegments - 1) {
-        curX += (Math.random() - 0.5) * 26;
-        curZ += (Math.random() - 0.5) * 26;
+        curX += (Math.random() - 0.5) * 28;
+        curZ += (Math.random() - 0.5) * 28;
       }
       attr.setXYZ(i, curX, y, curZ);
     }
@@ -1952,91 +2251,262 @@ export class DragonEngine {
     this.rainIntensity = THREE.MathUtils.damp(this.rainIntensity, targetRain, 0.9, dt);
     this.stormIntensity = THREE.MathUtils.damp(this.stormIntensity, targetStorm, 0.8, dt);
 
-    // Periodic lightning strikes during thunderstorms
+    const focusPos =
+      this.phase === 'skydiving' || this.phase === 'on_foot' ? this.riderPos : this.playerPos;
+    const targetVolcZone = this.computeVolcanicZoneFactor(focusPos.x, focusPos.z);
+    this.volcanicZoneFactor = THREE.MathUtils.damp(
+      this.volcanicZoneFactor,
+      targetVolcZone,
+      1.35,
+      dt,
+    );
+
+    // Periodic global storm lightning + localized volcanic dirty-thunderstorm lightning
     this.lightningPower = Math.max(0, this.lightningPower - dt * 3.8);
+    this.volcanicLightningPower = Math.max(0, this.volcanicLightningPower - dt * 4.2);
+
     if (this.stormIntensity > 0.55) {
       this.nextLightningTimer -= dt;
       if (this.nextLightningTimer <= 0) {
         this.nextLightningTimer = 2.6 + Math.random() * 4.4 - this.stormIntensity * 0.9;
-        this.triggerLightningStrike();
+        this.triggerLightningStrike(false);
       }
     } else {
       this.nextLightningTimer = Math.min(this.nextLightningTimer, 1.5);
+    }
+
+    if (this.volcanicZoneFactor > 0.22) {
+      this.nextVolcanicLightningTimer -= dt;
+      if (this.nextVolcanicLightningTimer <= 0) {
+        this.nextVolcanicLightningTimer =
+          1.25 + Math.random() * 1.95 - this.volcanicZoneFactor * 0.45;
+        this.triggerLightningStrike(true);
+      }
+    } else {
+      this.nextVolcanicLightningTimer = Math.min(this.nextVolcanicLightningTimer, 0.9);
     }
 
     const flicker =
       this.lightningPower > 0.02
         ? this.lightningPower * (0.62 + 0.38 * Math.sin(elapsed * 72))
         : 0;
+    const volcanicFlicker =
+      this.volcanicLightningPower > 0.02
+        ? this.volcanicLightningPower * (0.58 + 0.42 * Math.sin(elapsed * 86 + 1.3))
+        : 0;
+    const combinedFlicker = Math.max(flicker, volcanicFlicker);
+    const effectiveStorm = Math.min(
+      1,
+      Math.max(this.stormIntensity, this.volcanicZoneFactor * 0.88),
+    );
 
-    // 1. Alter player visibility via exponential atmospheric fog
+    // Ambient swirling volcanic soot/ash plumes & continuous rising crater columns
+    if (this.volcanicZoneFactor > 0.25 && Math.random() < this.volcanicZoneFactor * 0.46) {
+      const isEmber = Math.random() < 0.24;
+      if (isEmber) {
+        this.spawnParticle(
+          focusPos.x + (Math.random() - 0.5) * 90,
+          focusPos.y + (Math.random() - 0.4) * 34,
+          focusPos.z + (Math.random() - 0.5) * 90,
+          (Math.random() - 0.5) * 4,
+          3.5 + Math.random() * 5.5,
+          (Math.random() - 0.5) * 4,
+          Math.random() < 0.5 ? 0xf97316 : 0xfbbf24,
+          1.15,
+          0.85,
+          1.6,
+          -0.9,
+          true,
+        );
+      } else {
+        this.spawnSmoke(
+          focusPos.x + (Math.random() - 0.5) * 105,
+          focusPos.y + (Math.random() - 0.4) * 38,
+          focusPos.z + (Math.random() - 0.5) * 105,
+          (Math.random() - 0.5) * 4,
+          1.2 + Math.random() * 2.5,
+          (Math.random() - 0.5) * 4,
+          0x26211e,
+          2.8,
+          6.5,
+          17.5,
+          1.2,
+          this.volcanicZoneFactor * 0.35,
+          0.9,
+        );
+      }
+    }
+
+    // Towering realistic volcanic smoke columns rising from craters when nearby
+    this.volcanoPlumeTimer += dt;
+    if (this.volcanoPlumeTimer >= 0.24) {
+      this.volcanoPlumeTimer = 0;
+      const craters: [number, number, number, number][] = [
+        [940, 112, 90, 1.0],
+        [-1520, 108, -1500, 0.9],
+        [-1780, 96, -1300, 0.78],
+      ];
+      for (const [cx, cy, cz, scaleM] of craters) {
+        if (Math.hypot(focusPos.x - cx, focusPos.z - cz) < 1650) {
+          this.spawnSmoke(
+            cx + (Math.random() - 0.5) * 18,
+            cy + Math.random() * 6,
+            cz + (Math.random() - 0.5) * 18,
+            (Math.random() - 0.5) * 4,
+            10 + Math.random() * 6,
+            (Math.random() - 0.5) * 4,
+            Math.random() < 0.55 ? 0x2b2522 : 0x3b332e,
+            5.4,
+            18 * scaleM,
+            58 * scaleM,
+            3.6,
+            0.55,
+            1.1,
+          );
+        }
+      }
+    }
+
+    // 1. Alter player visibility via exponential atmospheric + pyroclastic ash fog
     const fog = this.scene.fog as THREE.FogExp2;
-    const clearToRain = Math.min(1, this.stormIntensity * 2.5);
-    const rainToStorm = Math.max(0, (this.stormIntensity - 0.36) / 0.64);
+    const clearToRain = Math.min(1, effectiveStorm * 2.5);
+    const rainToStorm = Math.max(0, (effectiveStorm - 0.36) / 0.64);
     fog.color
       .copy(_fogColorClear)
       .lerp(_fogColorRain, clearToRain)
       .lerp(_fogColorStorm, rainToStorm)
-      .lerp(_fogColorFlash, flicker * 0.45);
-    fog.density = THREE.MathUtils.lerp(
+      .lerp(_fogColorVolcanic, this.volcanicZoneFactor * 0.82)
+      .lerp(_fogColorFlash, combinedFlicker * 0.45);
+    const baseDensity = THREE.MathUtils.lerp(
       0.00021,
       THREE.MathUtils.lerp(0.0011, 0.0020, rainToStorm),
       clearToRain,
     );
+    const altFogScale = Math.max(0.32, 1 - Math.max(0, focusPos.y - 160) / 860);
+    fog.density =
+      THREE.MathUtils.lerp(
+        baseDensity,
+        Math.max(baseDensity, 0.00148),
+        this.volcanicZoneFactor,
+      ) * altFogScale;
     (this.scene.background as THREE.Color).copy(fog.color);
 
-    // 2. Update sky dome, UE5 volumetric cloud shader & ocean shader uniforms
-    this.world.skyMaterial.uniforms.uStormFactor.value = this.stormIntensity;
-    this.world.skyMaterial.uniforms.uLightning.value = flicker;
+    // 2. Update sky dome, UE5 volumetric cloud shader, volumetric smoke & ocean shader uniforms
+    this.world.skyMaterial.uniforms.uStormFactor.value = effectiveStorm;
+    this.world.skyMaterial.uniforms.uLightning.value = Math.max(flicker, volcanicFlicker * 0.72);
     this.world.cloudMaterial.uniforms.uTime.value = elapsed;
-    this.world.cloudMaterial.uniforms.uStormFactor.value = this.stormIntensity;
+    this.world.cloudMaterial.uniforms.uStormFactor.value = effectiveStorm;
     this.world.cloudMaterial.uniforms.uLightning.value = flicker;
+    this.world.cloudMaterial.uniforms.uVolcanicLightning.value = Math.max(
+      volcanicFlicker,
+      flicker * 0.65,
+    );
+    this.smokeMat.uniforms.uTime.value = elapsed;
+    this.smokeMat.uniforms.uStormFactor.value = effectiveStorm;
+    this.smokeMat.uniforms.uLightning.value = combinedFlicker;
 
     if (this.world.oceanMaterial.userData.shader) {
       const uniforms = this.world.oceanMaterial.userData.shader.uniforms;
       uniforms.uTime.value = elapsed;
-      uniforms.uStormFactor.value = this.stormIntensity;
-      uniforms.uLightning.value = flicker;
+      uniforms.uStormFactor.value = effectiveStorm;
+      uniforms.uLightning.value = Math.max(flicker, volcanicFlicker * 0.78);
+      if (uniforms.uDragonWakePos) {
+        uniforms.uDragonWakePos.value.set(
+          this.oceanWakePosXZ.x,
+          this.oceanWakePosXZ.y,
+          this.oceanWakeIntensity,
+        );
+      }
+      if (uniforms.uDragonWakeDir) {
+        uniforms.uDragonWakeDir.value.copy(this.oceanWakeDirXZ);
+      }
+      if (uniforms.uWakeTrail?.value) {
+        const trail = uniforms.uWakeTrail.value as THREE.Vector4[];
+        for (let i = 0; i < trail.length; i++) {
+          if (trail[i].w > 0.005) {
+            trail[i].z += dt;
+            if (trail[i].z > 4.2) trail[i].w = 0;
+          }
+        }
+      }
     }
 
     // 3. Modulate UE5 balanced lighting + electric specular lightning on dragon scales & ocean
-    this.sunLight.intensity = THREE.MathUtils.lerp(2.15, 0.42, this.stormIntensity);
-    this.sunLight.color.copy(_sunColorClear).lerp(_sunColorStorm, this.stormIntensity);
+    this.sunLight.intensity = THREE.MathUtils.lerp(2.15, 0.42, effectiveStorm);
+    this.sunLight.color.copy(_sunColorClear).lerp(_sunColorStorm, effectiveStorm);
     this.hemiLight.intensity =
-      THREE.MathUtils.lerp(0.36, 0.22, this.stormIntensity) + flicker * 0.55;
-    this.hemiLight.color.copy(_hemiSkyClear).lerp(_hemiSkyStorm, this.stormIntensity);
-    this.hemiLight.groundColor.copy(_hemiGndClear).lerp(_hemiGndStorm, this.stormIntensity);
+      THREE.MathUtils.lerp(0.36, 0.22, effectiveStorm) + combinedFlicker * 0.58;
+    this.hemiLight.color.copy(_hemiSkyClear).lerp(_hemiSkyStorm, effectiveStorm);
+    this.hemiLight.groundColor.copy(_hemiGndClear).lerp(_hemiGndStorm, effectiveStorm);
     this.rimLight.intensity =
-      THREE.MathUtils.lerp(0.44, 0.62, this.stormIntensity) + flicker * 1.15;
-    this.oceanBounceLight.intensity = THREE.MathUtils.lerp(0.2, 0.1, this.stormIntensity);
+      THREE.MathUtils.lerp(0.44, 0.62, effectiveStorm) + combinedFlicker * 1.25;
+    this.oceanBounceLight.intensity = THREE.MathUtils.lerp(0.2, 0.1, effectiveStorm);
 
-    this.lightningDirLight.intensity = flicker * 7.8;
+    this.lightningDirLight.intensity = combinedFlicker * 8.4;
     this.world.oceanMaterial.envMapIntensity =
-      THREE.MathUtils.lerp(1.15, 1.55, this.stormIntensity) + flicker * 0.85;
+      THREE.MathUtils.lerp(1.15, 1.55, effectiveStorm) + combinedFlicker * 0.9;
+    this.scene.environmentIntensity = 0.56 + combinedFlicker * 0.95;
 
     // Position two close lightning point lights to rake across dragon's 3D scales & clearcoat
     _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
     _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
+    _lightningDir.copy(this.lightningOrigin).sub(this.playerPos);
+    if (_lightningDir.lengthSq() > 1) {
+      _lightningDir.normalize();
+    } else {
+      _lightningDir.set(0.3, 0.9, -0.3).normalize();
+    }
 
     this.lightningDragonLight.position
       .copy(this.playerPos)
-      .addScaledVector(_forward, 6)
-      .addScaledVector(_right, -5);
-    this.lightningDragonLight.position.y += 10;
-    this.lightningDragonLight.intensity = flicker * 82;
+      .addScaledVector(_lightningDir, 14);
+    this.lightningDragonLight.position.y += 8;
+    this.lightningDragonLight.intensity = combinedFlicker * 92;
 
     this.lightningDragonRimLight.position
       .copy(this.playerPos)
       .addScaledVector(_forward, 9)
       .addScaledVector(_right, 7);
     this.lightningDragonRimLight.position.y += 4.5;
-    this.lightningDragonRimLight.intensity = flicker * 54;
+    this.lightningDragonRimLight.intensity = combinedFlicker * 64;
 
-    this.lightningBolt.visible = flicker > 0.08;
-    this.lightningMat.opacity = Math.min(1, flicker * 1.3);
+    // Physical clearcoat & custom Fresnel/specular lightning surface reflection on Player + AI dragons
+    const boltColorHex = volcanicFlicker > flicker ? 0xe0f2fe : 0xcbeaff;
+    if (combinedFlicker > 0.015) {
+      const playerStrikeBoost = Math.min(1.5, combinedFlicker * (1 + this.volcanicZoneFactor * 0.42));
+      this.playerRig.setLightningReflection(playerStrikeBoost, _lightningDir, boltColorHex);
+    } else {
+      this.playerRig.setLightningReflection(0);
+    }
+
+    for (const ai of this.aiDragons) {
+      if (!ai.alive) {
+        ai.rig.setLightningReflection(0);
+        continue;
+      }
+      const aiVolc = this.computeVolcanicZoneFactor(ai.pos.x, ai.pos.z);
+      const localAiFlash = Math.max(flicker, volcanicFlicker * Math.max(aiVolc, 0.25));
+      if (localAiFlash > 0.02) {
+        _v1.copy(this.lightningOrigin).sub(ai.pos);
+        const distToBolt = _v1.length();
+        const falloff = 1 - THREE.MathUtils.smoothstep(distToBolt, 260, 1450);
+        const refl = localAiFlash * (0.45 + 0.85 * falloff) * (1 + aiVolc * 0.35);
+        if (distToBolt > 0.01) {
+          _v1.divideScalar(distToBolt);
+        } else {
+          _v1.set(0.3, 0.9, -0.3).normalize();
+        }
+        ai.rig.setLightningReflection(refl, _v1, boltColorHex);
+      } else {
+        ai.rig.setLightningReflection(0);
+      }
+    }
+
+    this.lightningBolt.visible = combinedFlicker > 0.08;
+    this.lightningMat.opacity = Math.min(1, combinedFlicker * 1.35);
 
     // Refresh CubeMap sky reflection when storm band shifts
-    const stormBand = Math.round(this.stormIntensity * 2);
+    const stormBand = Math.round(effectiveStorm * 2);
     if (stormBand !== this.lastReflectionStormBand) {
       this.lastReflectionStormBand = stormBand;
       this.updateOceanReflection();
@@ -2103,22 +2573,40 @@ export class DragonEngine {
           ship.group.position.y = -ship.sinkProgress * 19;
           ship.group.rotation.z = ship.damageTiltZ + ship.sinkProgress * 0.82;
           ship.group.rotation.x = ship.damageTiltX + ship.sinkProgress * 0.45;
-          if (Math.random() < 0.55) {
-            const isFire = ship.burnLevel > 0.15 && Math.random() < 0.45;
-            this.spawnParticle(
-              ship.group.position.x + (Math.random() - 0.5) * 14,
-              1.4 + Math.random() * 2,
-              ship.group.position.z + (Math.random() - 0.5) * 14,
-              (Math.random() - 0.5) * 6,
-              6 + Math.random() * 8,
-              (Math.random() - 0.5) * 6,
-              isFire ? 0xff5a00 : 0xcbd5e1,
-              0.95,
-              1.8,
-              6.5,
-              -1.2,
-              isFire,
-            );
+          if (Math.random() < 0.6) {
+            const isFire = ship.burnLevel > 0.15 && Math.random() < 0.42;
+            if (isFire) {
+              this.spawnParticle(
+                ship.group.position.x + (Math.random() - 0.5) * 14,
+                1.4 + Math.random() * 2,
+                ship.group.position.z + (Math.random() - 0.5) * 14,
+                (Math.random() - 0.5) * 6,
+                6 + Math.random() * 8,
+                (Math.random() - 0.5) * 6,
+                0xff5a00,
+                0.78,
+                1.8,
+                5.4,
+                -1.4,
+                true,
+              );
+            } else {
+              this.spawnSmoke(
+                ship.group.position.x + (Math.random() - 0.5) * 14,
+                1.6 + Math.random() * 2.5,
+                ship.group.position.z + (Math.random() - 0.5) * 14,
+                (Math.random() - 0.5) * 4,
+                5.5 + Math.random() * 6,
+                (Math.random() - 0.5) * 4,
+                ship.burnLevel > 0.15 ? 0x262220 : 0x94a3b8,
+                2.5,
+                4.2,
+                15.0,
+                3.2,
+                ship.burnLevel * 0.45,
+                0.85,
+              );
+            }
           }
         } else {
           ship.group.visible = false;
@@ -2155,8 +2643,8 @@ export class DragonEngine {
           sail.scale.y = Math.max(0.18, 1 - ship.burnLevel * 0.62);
         }
 
-        // Dynamic flame plumes, rising embers & thick black smoke along deck and rigging
-        if (Math.random() < 0.78) {
+        // Dynamic flame plumes + thick curling billowing black smoke columns with warm fire underglow
+        if (Math.random() < 0.85) {
           const alongZ = (Math.random() - 0.5) * 28;
           const sinY = Math.sin(ship.group.rotation.y);
           const cosY = Math.cos(ship.group.rotation.y);
@@ -2164,20 +2652,38 @@ export class DragonEngine {
           const fz = ship.group.position.z + cosY * alongZ + (Math.random() - 0.5) * 4;
           const flameY = ship.group.position.y + 4.5 + Math.random() * (9 * ship.burnLevel + 3);
           const kindRoll = Math.random();
-          this.spawnParticle(
-            fx,
-            flameY,
-            fz,
-            (Math.random() - 0.5) * 5,
-            8 + Math.random() * 11,
-            (Math.random() - 0.5) * 5,
-            kindRoll < 0.46 ? 0xff7b1a : kindRoll < 0.68 ? 0xffdf7a : 0x1e293b,
-            kindRoll < 0.68 ? 0.72 : 1.55,
-            kindRoll < 0.68 ? 2.1 : 2.6,
-            kindRoll < 0.68 ? 5.8 : 9.4,
-            kindRoll < 0.68 ? -2.2 : -3.4,
-            kindRoll < 0.68,
-          );
+          if (kindRoll < 0.52) {
+            this.spawnParticle(
+              fx,
+              flameY,
+              fz,
+              (Math.random() - 0.5) * 5,
+              8 + Math.random() * 11,
+              (Math.random() - 0.5) * 5,
+              kindRoll < 0.34 ? 0xff7b1a : 0xffdf7a,
+              0.68,
+              2.1,
+              5.6,
+              -2.2,
+              true,
+            );
+          } else {
+            this.spawnSmoke(
+              fx,
+              flameY + 1.8,
+              fz,
+              (Math.random() - 0.5) * 4,
+              7.5 + Math.random() * 6.5,
+              (Math.random() - 0.5) * 4,
+              kindRoll < 0.78 ? 0x1c1917 : 0x332d2a,
+              3.1,
+              4.6,
+              18.5,
+              4.2,
+              0.85,
+              0.95,
+            );
+          }
         }
       } else if (ship.burnLevel > 0) {
         ship.burnLevel = Math.max(0, ship.burnLevel - dt * 0.08);
@@ -2210,14 +2716,48 @@ export class DragonEngine {
     this.world.updateCitizens(elapsed);
 
     for (const c of this.world.cloudClusters) {
-      c.center.y = c.baseY + Math.sin(elapsed * 0.32 + c.driftPhase) * 1.85;
+      const rate = c.isVolcanic ? 0.5 : 0.32;
+      const amp = c.isVolcanic ? 4.25 : 1.85;
+      c.center.y = c.baseY + Math.sin(elapsed * rate + c.driftPhase) * amp;
+    }
+
+    // Smoldering smoke plumes rising from scorched/damaged buildings
+    for (const b of this.world.destructibleBuildings) {
+      if (b.destroyed) continue;
+      if ((b.scorchAmount > 0.1 || b.hp < b.maxHp * 0.76) && Math.random() < 0.15) {
+        this.spawnSmoke(
+          b.pos.x + (Math.random() - 0.5) * b.radius * 0.9,
+          b.pos.y + Math.random() * b.height * 0.45,
+          b.pos.z + (Math.random() - 0.5) * b.radius * 0.9,
+          (Math.random() - 0.5) * 3,
+          5 + Math.random() * 5,
+          (Math.random() - 0.5) * 3,
+          b.scorchAmount > 0.25 ? 0x24201e : 0x524c48,
+          3.2,
+          4.8,
+          17.5,
+          3.4,
+          b.scorchAmount * 0.65,
+          0.95,
+        );
+      }
     }
 
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toastMessage = null;
     }
+    if (this.knightSpeechTimer > 0) {
+      this.knightSpeechTimer -= dt;
+      if (this.knightSpeechTimer <= 0) {
+        this.knightSpeechText = null;
+      }
+    }
     if (this.roarTimer > 0) this.roarTimer = Math.max(0, this.roarTimer - dt);
+    if (this.talonClashTimer > 0) this.talonClashTimer = Math.max(0, this.talonClashTimer - dt);
+    if (this.talonClashCooldown > 0) {
+      this.talonClashCooldown = Math.max(0, this.talonClashCooldown - dt);
+    }
     if (this.healBurstTimer > 0) this.healBurstTimer = Math.max(0, this.healBurstTimer - dt);
     if (this.fireCooldown > 0) this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     if (this.collisionCooldown > 0) this.collisionCooldown = Math.max(0, this.collisionCooldown - dt);
@@ -2331,8 +2871,13 @@ export class DragonEngine {
     this.updateAiDragons(dt, elapsed);
     this.updateProjectiles(dt);
     this.updateParticles(dt);
+    this.updateElemParticles(dt, elapsed);
+    this.updateWaterWakes(dt, elapsed);
+    this.updateSmoke(dt, elapsed);
     this.updateDebris(dt, elapsed);
     this.updateVfx(dt);
+    this.breathImpactVfxTimer = Math.max(0, this.breathImpactVfxTimer - dt);
+    this.updateMotionBlurAndStreaks(dt, elapsed);
 
     this.audio.updateAmbience(
       this.playerSpeed,
@@ -2349,6 +2894,116 @@ export class DragonEngine {
     }
   }
 
+  private updateMotionBlurAndStreaks(dt: number, elapsed: number): void {
+    const boosting =
+      this.phase === 'flying' &&
+      !this.playerCrashing &&
+      (this.isBoosting ||
+        this.halfLoopRemaining > 0.05 ||
+        Boolean(this.keys['ShiftLeft']) ||
+        Boolean(this.keys['ShiftRight']) ||
+        Boolean(this.keys['KeyW']));
+
+    let targetBlur = 0;
+    if (this.phase === 'flying' && !this.playerCrashing) {
+      const speedFactor = THREE.MathUtils.clamp((this.playerSpeed - 68) / 56, 0, 1);
+      const diveFactor = this.diveTuckFactor * 0.78;
+      const boostPulse = boosting ? 0.65 + speedFactor * 0.35 : 0;
+      targetBlur = THREE.MathUtils.clamp(
+        Math.max(speedFactor * 0.88, boostPulse, diveFactor),
+        0,
+        1,
+      );
+    } else if (this.phase === 'skydiving' && this.skydiveState === 'falling') {
+      targetBlur = THREE.MathUtils.clamp((this.riderVel.length() - 26) / 48, 0, 0.72);
+    }
+
+    this.motionBlurIntensity = THREE.MathUtils.damp(
+      this.motionBlurIntensity,
+      targetBlur,
+      targetBlur > this.motionBlurIntensity ? 6.5 : 4.2,
+      dt,
+    );
+    this.boostVisualFactor = THREE.MathUtils.damp(
+      this.boostVisualFactor,
+      boosting ? 1 : 0,
+      7.5,
+      dt,
+    );
+
+    if (this.filmicPass) {
+      const u = this.filmicPass.uniforms;
+      u.motionBlur.value = this.motionBlurIntensity;
+      u.boostFactor.value = this.boostVisualFactor;
+      u.steerSmear.value = THREE.MathUtils.clamp(
+        -this.smoothedHandX * this.motionBlurIntensity,
+        -1,
+        1,
+      );
+      u.vignetteStrength.value = 0.24 + this.motionBlurIntensity * 0.14;
+    }
+
+    if (this.motionBlurIntensity > 0.08 && (this.phase === 'flying' || this.phase === 'skydiving')) {
+      this.speedStreakLines.visible = true;
+      this.speedStreakMat.opacity = THREE.MathUtils.clamp(
+        (this.motionBlurIntensity - 0.08) * (0.34 + this.boostVisualFactor * 0.24),
+        0,
+        0.55,
+      );
+      if (this.boostVisualFactor > 0.35) {
+        this.speedStreakMat.color.setHex(0xffe7c4);
+      } else {
+        this.speedStreakMat.color.setHex(0xeaf6ff);
+      }
+
+      // Camera basis vectors in world space (zero GC)
+      this.camera.updateMatrixWorld();
+      const me = this.camera.matrixWorld.elements;
+      _right.set(me[0], me[1], me[2]).normalize();
+      _up.set(me[4], me[5], me[6]).normalize();
+      _forward.set(-me[8], -me[9], -me[10]).normalize();
+
+      const posAttr = this.speedStreakLines.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const arr = posAttr.array as Float32Array;
+      const travelRate = 1.65 + this.motionBlurIntensity * 2.1 + this.boostVisualFactor * 1.1;
+      const streakLen = 3.2 + this.motionBlurIntensity * 6.8 + this.boostVisualFactor * 3.4;
+      const camPos = this.camera.position;
+
+      for (let i = 0; i < this.speedStreakCount; i++) {
+        const ang = this.speedStreakSeeds[i * 4];
+        const rad = this.speedStreakSeeds[i * 4 + 1] * (1.0 - this.boostVisualFactor * 0.14);
+        const phase0 = this.speedStreakSeeds[i * 4 + 2];
+        const mul = this.speedStreakSeeds[i * 4 + 3];
+
+        const zProg = (phase0 + elapsed * travelRate * mul) % 1;
+        // Stream from 58m ahead down to 1m behind camera
+        const depth = 58 - zProg * 60;
+        const spreadScale = 0.55 + (1 - zProg) * 0.65;
+        const ox = Math.cos(ang) * rad * spreadScale;
+        const oy = Math.sin(ang) * rad * 0.68 * spreadScale;
+
+        _v1
+          .copy(camPos)
+          .addScaledVector(_forward, depth)
+          .addScaledVector(_right, ox)
+          .addScaledVector(_up, oy);
+        _v2.copy(_v1).addScaledVector(_forward, streakLen * mul);
+
+        const idx = i * 6;
+        arr[idx] = _v1.x;
+        arr[idx + 1] = _v1.y;
+        arr[idx + 2] = _v1.z;
+        arr[idx + 3] = _v2.x;
+        arr[idx + 4] = _v2.y;
+        arr[idx + 5] = _v2.z;
+      }
+      posAttr.needsUpdate = true;
+    } else {
+      this.speedStreakLines.visible = false;
+      this.speedStreakMat.opacity = 0;
+    }
+  }
+
   private updateSanctuaryState(dt: number, elapsed: number): void {
     this.playerSpeed = 0;
     this.playerPos.copy(this.world.sanctuaryDragonPerch);
@@ -2362,16 +3017,20 @@ export class DragonEngine {
 
     const breathe = Math.sin(elapsed * 2.1);
     const stretch = this.healBurstTimer > 0 ? Math.sin(this.healBurstTimer * Math.PI) * 0.45 : 0;
-    this.playerRig.leftWingInner.rotation.z = -0.35 + breathe * 0.04 + stretch;
-    this.playerRig.leftWingOuter.rotation.z = -0.65 - stretch * 0.4;
-    this.playerRig.rightWingInner.rotation.z = 0.35 - breathe * 0.04 - stretch;
-    this.playerRig.rightWingOuter.rotation.z = 0.65 + stretch * 0.4;
+    this.playerRig.leftWingInner.rotation.set(0, 0, -0.35 + breathe * 0.04 + stretch);
+    this.playerRig.leftWingOuter.rotation.set(0, 0, -0.65 - stretch * 0.4);
+    this.playerRig.rightWingInner.rotation.set(0, 0, 0.35 - breathe * 0.04 - stretch);
+    this.playerRig.rightWingOuter.rotation.set(0, 0, 0.65 + stretch * 0.4);
 
     this.playerRig.neckGroup.rotation.x =
       0.06 * breathe + (this.roarTimer > 0 ? -0.32 : 0);
     this.playerRig.jawGroup.rotation.x = this.roarTimer > 0 ? 0.55 : 0.04 + breathe * 0.02;
-    this.playerRig.leftHindLeg.rotation.x = -0.68;
-    this.playerRig.rightHindLeg.rotation.x = -0.68;
+    this.playerRig.bodyGroup.position.set(0, breathe * 0.04, 0);
+    this.playerRig.bodyGroup.rotation.set(0.05, 0, 0);
+    this.playerRig.leftHindLeg.rotation.x = 0.04;
+    this.playerRig.rightHindLeg.rotation.x = 0.04;
+    this.playerRig.leftHindFoot.rotation.x = -0.04;
+    this.playerRig.rightHindFoot.rotation.x = -0.04;
 
     for (let i = 0; i < this.playerRig.tailSegments.length; i++) {
       this.playerRig.tailSegments[i].rotation.y = Math.sin(elapsed * 1.4 - i * 0.5) * 0.08;
@@ -2490,39 +3149,108 @@ export class DragonEngine {
     _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
     _up.set(0, 1, 0).applyQuaternion(this.flightQuat).normalize();
 
-    // Real Newtonian Aerodynamics: Gravity + Wing Lift + Thrust + Quadratic Drag + Keel Side-Slip Damping + Wind Gusts
+    // Real Newtonian Aerodynamics: Gravity + Wing Lift + Dive Wing-Tuck Boost + Thrust + Drag + Keel Damping
     const forwardSpeed = this.velocity.dot(_forward);
+    const currentPitchSlope = _forward.y;
 
-    // Aerodynamic stall: climbing steeply at low airspeed naturally drops the dragon's nose forward
-    if (this.halfLoopRemaining <= 0 && forwardSpeed < 22 && _forward.y > 0.35) {
-      _qPitch.setFromAxisAngle(_unitX, -0.78 * dt);
+    // Aerodynamic stall: only drop nose if climbing very steeply while nearly motionless and not boosting
+    if (this.halfLoopRemaining <= 0 && !boosting && forwardSpeed < 16 && currentPitchSlope > 0.58) {
+      _qPitch.setFromAxisAngle(_unitX, -0.72 * dt);
       this.flightQuat.multiply(_qPitch).normalize();
       _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
       _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
       _up.set(0, 1, 0).applyQuaternion(this.flightQuat).normalize();
     }
 
-    // 1. Gravity
-    this.velocity.y -= 22.0 * dt;
+    // Smooth dive wing-tuck factor when diving downward (folds wings tightly to body & boosts speed!)
+    const targetDiveTuck =
+      !this.landingRequested && this.halfLoopRemaining <= 0 && currentPitchSlope < -0.15
+        ? THREE.MathUtils.clamp((-currentPitchSlope - 0.15) / 0.52, 0, 1)
+        : 0;
+    this.diveTuckFactor = THREE.MathUtils.damp(this.diveTuckFactor, targetDiveTuck, 7.2, dt);
 
-    // 2. Wing Lift along local UP (plus loop centripetal support during active half-circle turn)
+    // Lateral Maneuver Telemetry: Knife-Edge 90°, Sudden/Sharp Turn, Half-Loop & Steep Dive
+    const turnSpike = Math.abs(turnInput - this.prevTurnInput) / Math.max(0.008, dt);
+    this.prevTurnInput = turnInput;
+    const absTurn = Math.abs(turnInput);
+    const absRoll = Math.abs(this.playerRoll);
+
+    if (this.knifeEdgeSide !== 0 || absRoll > 1.05) {
+      this.maneuverKind = 'knife_edge';
+      const rollSide = this.knifeEdgeSide !== 0 ? this.knifeEdgeSide : this.playerRoll >= 0 ? 1 : -1;
+      this.maneuverSide = rollSide > 0 ? -1 : 1;
+      this.maneuverIntensity = THREE.MathUtils.clamp(absRoll / (Math.PI * 0.5), 0.72, 1);
+      this.maneuverFlashTimer = Math.max(this.maneuverFlashTimer, 0.22);
+    } else if (this.halfLoopRemaining > 0.08) {
+      this.maneuverKind = 'half_loop';
+      this.maneuverSide = 0;
+      this.maneuverIntensity = 1;
+      this.maneuverFlashTimer = Math.max(this.maneuverFlashTimer, 0.24);
+    } else if (
+      absTurn > 0.54 ||
+      absRoll > 0.42 ||
+      (turnSpike > 3.0 && absTurn > 0.3)
+    ) {
+      const sideFromInput: -1 | 1 =
+        absTurn > 0.22 ? (turnInput > 0 ? -1 : 1) : this.playerRoll >= 0 ? -1 : 1;
+      this.maneuverKind = 'sharp_turn';
+      this.maneuverSide = sideFromInput;
+      this.maneuverIntensity = THREE.MathUtils.clamp(
+        Math.max(absTurn, absRoll / 0.84, Math.min(1, turnSpike / 7.5)),
+        0.48,
+        1,
+      );
+      this.maneuverFlashTimer = Math.max(this.maneuverFlashTimer, 0.4);
+    } else if (this.diveTuckFactor > 0.52) {
+      this.maneuverKind = 'steep_dive';
+      this.maneuverSide = 0;
+      this.maneuverIntensity = THREE.MathUtils.clamp(this.diveTuckFactor, 0.52, 1);
+      this.maneuverFlashTimer = Math.max(this.maneuverFlashTimer, 0.2);
+    } else {
+      this.maneuverFlashTimer = Math.max(0, this.maneuverFlashTimer - dt);
+      if (this.maneuverFlashTimer <= 0.01) {
+        this.maneuverKind = 'none';
+        this.maneuverSide = 0;
+        this.maneuverIntensity = 0;
+      } else {
+        this.maneuverIntensity = THREE.MathUtils.damp(this.maneuverIntensity, 0, 8, dt);
+      }
+    }
+
+    // 1. Gravity (amplified when wings are tucked cleanly into a dive)
+    this.velocity.y -= (22.0 + 16.5 * this.diveTuckFactor) * dt;
+
+    // 2. Wing Lift along local UP (scales smoothly down when wings are folded for a dive)
     const uprightFactor = Math.max(0, _up.y);
-    const baseLift = Math.min(27.5, Math.max(0, forwardSpeed * 0.46)) * (0.38 + 0.62 * uprightFactor);
+    const wingOpenLift = 1 - this.diveTuckFactor * 0.65;
+    const baseLift =
+      Math.min(31.5, Math.max(0, forwardSpeed * 0.52)) *
+      (0.42 + 0.58 * uprightFactor) *
+      wingOpenLift;
     const loopLift = this.halfLoopRemaining > 0 ? 18.0 : 0;
     this.velocity.addScaledVector(_up, (baseLift + loopLift) * dt);
 
-    // Wing speed upgrade boosts flight thrust & agility!
+    // 3. Thrust + High-Speed Dive Tuck Acceleration + Climb Reserve
     const wingSpeedBonus = this.progression.dragonUpgrades.wings * 6.5;
-    const thrustAccel = boosting
-      ? (spec.baseSpeed + wingSpeedBonus) * 1.18
-      : braking
-        ? (spec.baseSpeed + wingSpeedBonus) * 0.14
-        : (spec.baseSpeed + wingSpeedBonus) * 0.66;
+    const climbReserve = currentPitchSlope > 0.15 ? 14.0 * currentPitchSlope : 0;
+    const diveDrive = 48.0 * this.diveTuckFactor;
+    const thrustAccel =
+      (boosting
+        ? (spec.baseSpeed + wingSpeedBonus) * 1.24
+        : braking
+          ? (spec.baseSpeed + wingSpeedBonus) * 0.14
+          : (spec.baseSpeed + wingSpeedBonus) * 0.72) +
+      climbReserve +
+      diveDrive;
     this.velocity.addScaledVector(_forward, thrustAccel * dt);
 
-    // 4. Quadratic aerodynamic air resistance + rain drag
+    // 4. Quadratic aerodynamic air resistance (dramatically lower drag while wings are tucked into body!)
     const curSpeed = this.velocity.length();
-    const dragCoeff = 0.0086 * (1 + this.rainIntensity * 0.28) * (braking ? 1.85 : 1.0);
+    const dragCoeff =
+      0.0082 *
+      (1 + this.rainIntensity * 0.28) *
+      (braking ? 1.85 : 1.0) *
+      (1 - 0.54 * this.diveTuckFactor);
     this.velocity.addScaledVector(this.velocity, -dragCoeff * curSpeed * dt);
 
     // 5. Weathercock / Wing-Keel Side-Slip Damping (banking carves curved turns with real inertia)
@@ -2534,6 +3262,18 @@ export class DragonEngine {
       this.velocity.x -= gustX * 14.0 * dt;
       this.velocity.y += gustY * 11.5 * dt;
     }
+
+    // Expressive Dragon Roars during active flight, boost bursts & high-speed dives
+    if (curSpeed > 28) {
+      this.movementRoarTimer -= dt * (boosting ? 1.65 : this.diveTuckFactor > 0.45 ? 1.5 : 0.95);
+      if ((boosting && !this.wasBoosting && this.movementRoarTimer < 2.2) || this.movementRoarTimer <= 0) {
+        const roarEnergy = Math.min(1, curSpeed / 95 + this.diveTuckFactor * 0.35 + (boosting ? 0.25 : 0));
+        this.audio.playMovementRoar(this.activeElement, roarEnergy);
+        this.roarTimer = Math.max(this.roarTimer, 0.52);
+        this.movementRoarTimer = 4.2 + Math.random() * 4.4;
+      }
+    }
+    this.wasBoosting = boosting;
 
     // Integrate real world position
     this.playerPos.addScaledVector(this.velocity, dt);
@@ -2651,7 +3391,91 @@ export class DragonEngine {
       }
     }
 
-    // 8. Active Safe Landing Descent OR Real Terrain Slope & Ocean Plunge Physics
+    // 7c. Close-Range Aerial Talon Grapple & Foot Clash with Enemy Dragons (يصيبه أو يصاب)
+    let nearestTalonEnemyDist = Infinity;
+    for (const ai of this.aiDragons) {
+      if (!ai.alive || ai.team !== 'enemy' || !ai.rig.root.visible) continue;
+      const dist = this.playerPos.distanceTo(ai.pos);
+      if (dist < nearestTalonEnemyDist) {
+        nearestTalonEnemyDist = dist;
+      }
+      if (dist < 12.2 && this.talonClashCooldown <= 0) {
+        this.talonClashCooldown = 1.05;
+        this.talonClashTimer = 0.68;
+        ai.clashTimer = 0.68;
+
+        const playerAdvantage =
+          (curSpeed - ai.speed) * 0.45 +
+          (this.playerPos.y - ai.pos.y) * 0.85 +
+          this.diveTuckFactor * 28 +
+          (boosting ? 14 : 0) +
+          this.progression.knightUpgrades.sword * 5 +
+          (ai.frozenTimer > 0 ? 45 : 0) +
+          (Math.random() - 0.44) * 26;
+
+        let dmgToEnemy = 0;
+        let dmgToPlayer = 0;
+        if (playerAdvantage >= 4) {
+          // Player overpowers with crushing talon strike
+          dmgToEnemy = Math.round(24 + Math.min(24, playerAdvantage * 0.55) + this.progression.dragonUpgrades.breath * 3);
+          dmgToPlayer = ai.frozenTimer > 0 ? 0 : Math.round(Math.random() * 5);
+        } else if (playerAdvantage <= -10) {
+          // Rival dragon slashes player sharply in the grapple
+          dmgToPlayer = Math.round(10 + Math.random() * 7);
+          dmgToEnemy = Math.round(8 + Math.random() * 6);
+        } else {
+          // Fierce mutual mid-air talon brawl — both dragons wound each other
+          dmgToEnemy = Math.round(16 + Math.random() * 10);
+          dmgToPlayer = Math.round(7 + Math.random() * 6);
+        }
+
+        const armorMul = Math.max(0.45, 1 - this.progression.knightUpgrades.armor * 0.1);
+        const finalPlayerDmg = Math.round(dmgToPlayer * armorMul);
+
+        // Midpoint talon clash VFX & directional recoil
+        _v2.copy(this.playerPos).add(ai.pos).multiplyScalar(0.5);
+        _normal.copy(this.playerPos).sub(ai.pos);
+        if (_normal.lengthSq() > 0.01) {
+          _normal.normalize();
+        } else {
+          _normal.set(0, 1, 0);
+        }
+
+        this.spawnElementalCollisionBurst(_v2, _normal, this.activeElement, 0.9, true);
+        this.audio.playCrash('flesh', true);
+        this.audio.playSwordHit();
+        this.audio.playRoar(this.activeElement, 0.92, 0.85);
+        this.audio.speakKnight('battle_cry');
+        this.roarTimer = 0.72;
+        this.impactShake = Math.max(this.impactShake, finalPlayerDmg > 6 ? 0.82 : 0.52);
+
+        // Elastic recoil push apart after talon strike
+        this.playerPos.addScaledVector(_normal, 3.8);
+        ai.pos.addScaledVector(_normal, -3.8);
+        this.velocity.addScaledVector(_normal, 22);
+        this.velocity.y = Math.max(this.velocity.y, 8);
+
+        if (dmgToEnemy > 0) {
+          ai.hp -= dmgToEnemy;
+          if (ai.hp <= 0) {
+            this.killEnemyDragon(ai, false);
+          }
+        }
+        if (finalPlayerDmg > 0) {
+          this.hp = Math.max(0, this.hp - finalPlayerDmg);
+          this.woundsCount = Math.min(5, this.woundsCount + 1);
+          if (this.hp <= 0) {
+            this.playerCrashing = true;
+            this.playerCrashTimer = 0;
+            this.audio.playRoar(DRAGON_SPECS[this.dragonId].element);
+            this.audio.playFallWhoosh(1.65);
+          }
+        }
+        break;
+      }
+    }
+
+    // 8. Active Safe Landing Descent (flaring cleanly onto hind feet) OR Terrain Slope & Ocean Physics
     const walkableY = this.world.getWalkableGroundHeight(this.playerPos.x, this.playerPos.z);
     if (this.landingRequested) {
       if (walkableY < -0.2) {
@@ -2681,10 +3505,18 @@ export class DragonEngine {
         this.velocity.z = THREE.MathUtils.lerp(this.velocity.z, _v1.z * 46, 2.2 * dt);
         this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, 16 - this.playerPos.y, 2 * dt);
       } else {
-        this.velocity.x *= Math.exp(-1.5 * dt);
-        this.velocity.z *= Math.exp(-1.5 * dt);
-        this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, -22, 3.5 * dt);
-        if (this.playerPos.y <= walkableY + 3.0) {
+        // Gentle nose-up landing flare so hind legs & talons clearly catch the earth
+        if (_forward.y < 0.16) {
+          _qPitch.setFromAxisAngle(_unitX, 1.45 * dt);
+          this.flightQuat.multiply(_qPitch).normalize();
+          _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
+        }
+        this.velocity.x *= Math.exp(-1.9 * dt);
+        this.velocity.z *= Math.exp(-1.9 * dt);
+        const distAbove = Math.max(0, this.playerPos.y - walkableY);
+        const targetSink = distAbove < 14 ? -12 : -22;
+        this.velocity.y = THREE.MathUtils.lerp(this.velocity.y, targetSink, 3.8 * dt);
+        if (this.playerPos.y <= walkableY + 4.2) {
           this.completeDragonTouchdown(walkableY);
           return { isSkimmingWater: false, isSlicingCloud: false };
         }
@@ -2693,7 +3525,14 @@ export class DragonEngine {
 
     const groundY = getTerrainHeight(this.playerPos.x, this.playerPos.z);
     const overWater = groundY < -0.5;
-    const minFlightY = overWater ? 1.8 : Math.max(groundY, walkableY) + 2.8;
+    const minFlightY = overWater ? 1.8 : Math.max(groundY, walkableY) + 4.15;
+    if (overWater && this.playerPos.y < 3.6) {
+      // Physical hydrodynamic surface cushion & gentle spray drag when brushing ocean crests
+      const depthFrac = THREE.MathUtils.clamp((3.6 - this.playerPos.y) / 1.8, 0, 1);
+      this.velocity.y += depthFrac * 9.5 * dt;
+      this.velocity.multiplyScalar(1 - 0.14 * depthFrac * dt);
+      this.impactShake = Math.max(this.impactShake, 0.07 * depthFrac);
+    }
     if (this.playerPos.y < minFlightY) {
       if (overWater) {
         if (this.velocity.y < -12) {
@@ -2702,19 +3541,25 @@ export class DragonEngine {
           this.velocity.z *= 0.72;
           this.impactShake = Math.max(this.impactShake, 0.45);
           this.audio.playCrash('water', true);
-          for (let k = 0; k < 14; k++) {
-            this.spawnParticle(
+          this.spawnWaterWake(this.playerPos.x, this.playerPos.z, 0, 0, 1.3, 4.5, 28, 0, 1);
+          this.spawnWaterWake(this.playerPos.x - 4, this.playerPos.z, -_forward.z * 3, _forward.x * 3, 1.6, 4.0, 18, 1, 1);
+          this.spawnWaterWake(this.playerPos.x + 4, this.playerPos.z, _forward.z * 3, -_forward.x * 3, 1.6, 4.0, 18, 1, -1);
+          for (let k = 0; k < 18; k++) {
+            this.spawnElemParticle(
               this.playerPos.x + (Math.random() - 0.5) * 6,
-              1.0,
+              0.7,
               this.playerPos.z + (Math.random() - 0.5) * 6,
-              (Math.random() - 0.5) * 18,
-              10 + Math.random() * 14,
-              (Math.random() - 0.5) * 18,
-              0xdbf4ff,
-              0.85,
-              1.8,
-              6.0,
-              20,
+              (Math.random() - 0.5) * 22,
+              12 + Math.random() * 16,
+              (Math.random() - 0.5) * 22,
+              0xffffff,
+              0x7dd3fc,
+              0.65 + Math.random() * 0.35,
+              1.6,
+              4.8,
+              24,
+              1.2,
+              2,
             );
           }
         } else {
@@ -2750,19 +3595,21 @@ export class DragonEngine {
           this.velocity.multiplyScalar(0.68);
           this.audio.playCrash('stone', vn < -28);
           this.impactShake = Math.max(this.impactShake, Math.min(0.85, -vn * 0.024));
-          for (let k = 0; k < 14; k++) {
-            this.spawnParticle(
+          for (let k = 0; k < 12; k++) {
+            this.spawnSmoke(
               this.playerPos.x + (Math.random() - 0.5) * 6,
-              this.playerPos.y,
+              groundY + 1.0,
               this.playerPos.z + (Math.random() - 0.5) * 6,
               (Math.random() - 0.5) * 18,
-              6 + Math.random() * 12,
+              3 + Math.random() * 8,
               (Math.random() - 0.5) * 18,
-              0x9a8c7a,
-              0.85,
-              1.9,
-              6.6,
-              10,
+              0x8f7e68,
+              1.4,
+              3.4,
+              12.0,
+              1.6,
+              0,
+              0.6,
             );
           }
           if (vn < -26) {
@@ -2778,8 +3625,13 @@ export class DragonEngine {
         }
       }
     }
-    if (this.playerPos.y > 260) {
-      this.playerPos.y = 260;
+    // Ultra-high-altitude sky ceiling (up to 920m above sea level with thin-air cushion)
+    if (this.playerPos.y > 850) {
+      const overFrac = (this.playerPos.y - 850) / 70;
+      this.velocity.y -= overFrac * 24 * dt;
+    }
+    if (this.playerPos.y > 920) {
+      this.playerPos.y = 920;
       this.velocity.y = Math.min(0, this.velocity.y);
     }
 
@@ -2792,32 +3644,78 @@ export class DragonEngine {
     this.playerRig.root.position.copy(this.playerPos);
     this.playerRig.root.quaternion.copy(_finalQuat);
 
-    // Wingbeat kinematics
-    const flapSpeed =
-      pitchSlope > 0.1 || boosting ? 9.2 : pitchSlope < -0.18 ? 2.4 : 5.6;
+    // Wingbeat & Aerodynamic Dive Wing-Fold Kinematics
+    const flapSpeed = this.landingRequested
+      ? 10.2
+      : this.diveTuckFactor > 0.35
+        ? 1.8
+        : pitchSlope > 0.1 || boosting
+          ? 9.2
+          : 5.6;
     this.wingPhase += dt * flapSpeed;
     const flap = Math.sin(this.wingPhase);
     const sign = flap >= 0 ? 1 : -1;
-    if (sign !== this.lastWingSign && sign < 0 && flapSpeed > 4.2) {
+    if (sign !== this.lastWingSign && sign < 0 && flapSpeed > 4.2 && this.diveTuckFactor < 0.55) {
       this.audio.playWingbeat();
     }
     this.lastWingSign = sign;
 
-    const flapAmp =
-      this.knifeEdgeSide !== 0
+    const baseFlapAmp = this.landingRequested
+      ? 0.54
+      : this.knifeEdgeSide !== 0
         ? 0.24
-        : pitchSlope < -0.2
-          ? 0.14
-          : 0.46;
+        : 0.46;
+    const flapAmp = baseFlapAmp * (1 - this.diveTuckFactor * 0.92);
     const wingTuck = this.knifeEdgeSide !== 0 ? 0.34 : 0;
-    this.playerRig.leftWingInner.rotation.z = flap * flapAmp - wingTuck;
+
+    // Sweeping wings tightly backward & down against flanks during steep dives
+    const diveSweepInnerY = 0.98 * this.diveTuckFactor;
+    const diveSweepOuterY = 0.34 * this.diveTuckFactor;
+    const diveHugZ = 0.24 * this.diveTuckFactor;
+    const diveOuterFoldZ = 0.55 * this.diveTuckFactor;
+
+    this.playerRig.leftWingInner.rotation.y = diveSweepInnerY;
+    this.playerRig.leftWingOuter.rotation.y = diveSweepOuterY;
+    this.playerRig.rightWingInner.rotation.y = -diveSweepInnerY;
+    this.playerRig.rightWingOuter.rotation.y = -diveSweepOuterY;
+
+    this.playerRig.leftWingInner.rotation.z = flap * flapAmp - wingTuck + diveHugZ;
     this.playerRig.leftWingOuter.rotation.z =
-      Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 - wingTuck * 0.4;
-    this.playerRig.rightWingInner.rotation.z = -flap * flapAmp + wingTuck;
+      Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 - wingTuck * 0.4 - diveOuterFoldZ;
+    this.playerRig.rightWingInner.rotation.z = -flap * flapAmp + wingTuck - diveHugZ;
     this.playerRig.rightWingOuter.rotation.z =
-      -Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 + wingTuck * 0.4;
-    this.playerRig.leftHindLeg.rotation.x = 0.42 + flap * 0.08;
-    this.playerRig.rightHindLeg.rotation.x = 0.42 - flap * 0.08;
+      -Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 + wingTuck * 0.4 + diveOuterFoldZ;
+
+    // Prominent Hind Leg & Talon Pose: clearly lowered & extended during landing OR lunging in aerial talon clash!
+    const nearLandingGround =
+      walkableY >= -0.2 && this.playerPos.y - walkableY < 16 && this.velocity.y < 6;
+    const targetLegExtend = this.landingRequested || nearLandingGround ? 1 : 0;
+    this.landingLegExtend = THREE.MathUtils.damp(this.landingLegExtend, targetLegExtend, 6.5, dt);
+
+    const talonReady = nearestTalonEnemyDist < 22 ? 1 - THREE.MathUtils.smoothstep(nearestTalonEnemyDist, 10, 22) : 0;
+    const clashSwing =
+      this.talonClashTimer > 0
+        ? Math.sin(elapsed * 28) * 0.34
+        : talonReady * Math.sin(elapsed * 14) * 0.14;
+
+    const baseFlightLegX = 0.56;
+    const landedDropLegX = 0.02;
+    const clashLungeLegX = -0.78;
+    const clashBlend =
+      this.talonClashTimer > 0 ? 1 : talonReady > 0.05 ? talonReady * 0.85 : 0;
+    let legX = THREE.MathUtils.lerp(baseFlightLegX, landedDropLegX, this.landingLegExtend);
+    if (clashBlend > 0) {
+      legX = THREE.MathUtils.lerp(legX, clashLungeLegX, clashBlend);
+    }
+
+    this.playerRig.leftHindLeg.rotation.x = legX + flap * 0.08 * (1 - this.landingLegExtend) + clashSwing;
+    this.playerRig.rightHindLeg.rotation.x = legX - flap * 0.08 * (1 - this.landingLegExtend) - clashSwing;
+    let footX = THREE.MathUtils.lerp(0.48, 0.0, this.landingLegExtend);
+    if (clashBlend > 0) {
+      footX = THREE.MathUtils.lerp(footX, -0.18, clashBlend);
+    }
+    this.playerRig.leftHindFoot.rotation.x = footX;
+    this.playerRig.rightHindFoot.rotation.x = footX;
 
     // Synchronize Rider Hands, Leather Reins, and Dragon Neck with Hand Motion!
     const bob = Math.sin(this.wingPhase) * 0.04;
@@ -2905,11 +3803,12 @@ export class DragonEngine {
         1.18 + Math.sin(elapsed * 15) * 0.14 + (boosting ? 0.18 : 0);
 
       _up.set(0, 1, 0).applyQuaternion(this.flightQuat).normalize();
-      const followDist = 21.5 + (boosting ? 3.2 : 0);
+      const followDist = 21.5 + (boosting ? 3.2 : 0) + this.diveTuckFactor * 2.2;
+      const chaseUp = 6.8 - this.landingLegExtend * 2.2;
       _camTargetPos
         .copy(this.playerPos)
         .addScaledVector(_forward, -followDist)
-        .addScaledVector(_up, 6.8);
+        .addScaledVector(_up, chaseUp);
 
       const camGnd = getTerrainHeight(_camTargetPos.x, _camTargetPos.z);
       if (_up.y > 0.2) {
@@ -2925,7 +3824,7 @@ export class DragonEngine {
 
       this.camera.position.lerp(_camTargetPos, 1 - Math.exp(-10.5 * dt));
       this.dampCameraUp(_up, 6.5, dt);
-      _camLookAt.copy(this.playerPos).addScaledVector(_forward, 26).addScaledVector(_up, 1.6);
+      _camLookAt.copy(this.playerPos).addScaledVector(_forward, 26).addScaledVector(_up, 1.4 - this.landingLegExtend * 0.8);
       this.camera.lookAt(_camLookAt);
     } else {
       this.playerRig.riderBodyGroup.visible = false;
@@ -2940,7 +3839,11 @@ export class DragonEngine {
       this.camera.lookAt(_camLookAt);
     }
 
-    const targetFov = THREE.MathUtils.clamp(64 + (this.playerSpeed - 45) * 0.36, 62, 86);
+    const targetFov = THREE.MathUtils.clamp(
+      64 + (this.playerSpeed - 45) * 0.36 + this.diveTuckFactor * 6,
+      62,
+      92,
+    );
     this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 5, dt);
     this.camera.updateProjectionMatrix();
 
@@ -2949,16 +3852,130 @@ export class DragonEngine {
 
     const leftOverWater = getTerrainHeight(_v1.x, _v1.z) < -0.5;
     const rightOverWater = getTerrainHeight(_v2.x, _v2.z) < -0.5;
-    const leftSkim = leftOverWater && _v1.y < 7.2 && _v1.y > -2;
-    const rightSkim = rightOverWater && _v2.y < 7.2 && _v2.y > -2;
-    const bodySkim =
-      getTerrainHeight(this.playerPos.x, this.playerPos.z) < -0.5 && this.playerPos.y < 8.5;
+    const leftSkim = leftOverWater && _v1.y < 8.4 && _v1.y > -2;
+    const rightSkim = rightOverWater && _v2.y < 8.4 && _v2.y > -2;
+    const bodySkim = overWater && this.playerPos.y < 10.5;
     const isSkimmingWater = leftSkim || rightSkim || bodySkim;
 
+    // Continuous hydrodynamic ocean wake & vortex interaction when approaching/skimming water
+    const bodyProx = overWater
+      ? THREE.MathUtils.clamp((18.5 - Math.max(0, this.playerPos.y)) / 12.5, 0, 1)
+      : 0;
+    const leftProx = leftOverWater
+      ? THREE.MathUtils.clamp((11.5 - Math.max(0, _v1.y)) / 8.0, 0, 1)
+      : 0;
+    const rightProx = rightOverWater
+      ? THREE.MathUtils.clamp((11.5 - Math.max(0, _v2.y)) / 8.0, 0, 1)
+      : 0;
+    const targetWake = Math.max(bodyProx, leftProx * 0.85, rightProx * 0.85);
+    this.oceanWakeIntensity = THREE.MathUtils.damp(
+      this.oceanWakeIntensity,
+      targetWake,
+      targetWake > this.oceanWakeIntensity ? 7.0 : 2.6,
+      dt,
+    );
+    if (targetWake > 0.04) {
+      this.oceanWakePosXZ.set(this.playerPos.x, this.playerPos.z);
+      const hLen = Math.hypot(_forward.x, _forward.z);
+      if (hLen > 0.05) {
+        this.oceanWakeDirXZ.set(_forward.x / hLen, _forward.z / hLen);
+      }
+
+      this.wakeTrailDropTimer -= dt;
+      if (this.wakeTrailDropTimer <= 0) {
+        this.wakeTrailDropTimer = 0.14;
+        const shader = this.world.oceanMaterial.userData.shader;
+        if (shader?.uniforms?.uWakeTrail?.value) {
+          const trail = shader.uniforms.uWakeTrail.value as THREE.Vector4[];
+          trail[this.wakeTrailCursor].set(
+            this.playerPos.x,
+            this.playerPos.z,
+            0,
+            THREE.MathUtils.clamp(targetWake, 0.25, 1),
+          );
+          this.wakeTrailCursor = (this.wakeTrailCursor + 1) % trail.length;
+        }
+      }
+
+      this.wakeVortexSpawnTimer -= dt;
+      if (this.wakeVortexSpawnTimer <= 0) {
+        this.wakeVortexSpawnTimer = isSkimmingWater ? 0.045 : 0.095;
+        const fwdX = this.oceanWakeDirXZ.x;
+        const fwdZ = this.oceanWakeDirXZ.y;
+        const latX = -fwdZ;
+        const latZ = fwdX;
+        const speedMul = THREE.MathUtils.clamp(this.playerSpeed / 65, 0.65, 1.5);
+
+        // Center expanding wave wake following dragon flight path
+        this.spawnWaterWake(
+          this.playerPos.x - fwdX * 3.5,
+          this.playerPos.z - fwdZ * 3.5,
+          -fwdX * 3.2,
+          -fwdZ * 3.2,
+          1.25 + targetWake * 0.55,
+          4.5 + targetWake * 3.0,
+          (18 + targetWake * 14) * speedMul,
+          0,
+          1,
+        );
+
+        // Counter-rotating wingtip & downwash water vortices (دوامات مائية)
+        const lx = leftSkim || leftProx > 0.15 ? _v1.x : this.playerPos.x + latX * 7.2;
+        const lz = leftSkim || leftProx > 0.15 ? _v1.z : this.playerPos.z + latZ * 7.2;
+        const rx = rightSkim || rightProx > 0.15 ? _v2.x : this.playerPos.x - latX * 7.2;
+        const rz = rightSkim || rightProx > 0.15 ? _v2.z : this.playerPos.z - latZ * 7.2;
+
+        if (leftProx > 0.15 || bodyProx > 0.2) {
+          this.spawnWaterWake(
+            lx,
+            lz,
+            latX * 4.5 - fwdX * 4.0,
+            latZ * 4.5 - fwdZ * 4.0,
+            1.4 + targetWake * 0.7,
+            3.6 + targetWake * 2.2,
+            12.5 + targetWake * 7.5,
+            1,
+            1,
+          );
+        }
+        if (rightProx > 0.15 || bodyProx > 0.2) {
+          this.spawnWaterWake(
+            rx,
+            rz,
+            -latX * 4.5 - fwdX * 4.0,
+            -latZ * 4.5 - fwdZ * 4.0,
+            1.4 + targetWake * 0.7,
+            3.6 + targetWake * 2.2,
+            12.5 + targetWake * 7.5,
+            1,
+            -1,
+          );
+        }
+
+        // Churning frothy wake streak under dragon belly when touching/skimming closely
+        if (isSkimmingWater) {
+          this.spawnWaterWake(
+            this.playerPos.x - fwdX * 2.5,
+            this.playerPos.z - fwdZ * 2.5,
+            -fwdX * 2.0,
+            -fwdZ * 2.0,
+            0.95,
+            4.2,
+            11.0 * speedMul,
+            2,
+            Math.random() < 0.5 ? 1 : -1,
+            Math.atan2(fwdX, fwdZ),
+          );
+        }
+      }
+    }
+
     let isSlicingCloud = false;
+    let isSlicingVolcanicCloud = false;
     for (const cloud of this.world.cloudClusters) {
       if (this.playerPos.distanceTo(cloud.center) < cloud.radius + 9) {
         isSlicingCloud = true;
+        if (cloud.isVolcanic) isSlicingVolcanicCloud = true;
         break;
       }
     }
@@ -2970,77 +3987,91 @@ export class DragonEngine {
       if (leftSkim || bodySkim) {
         const sx = leftSkim ? _v1.x : this.playerPos.x - 4;
         const sz = leftSkim ? _v1.z : this.playerPos.z;
-        this.spawnParticle(
-          sx,
-          0.9,
-          sz,
-          (Math.random() - 0.5) * 8,
-          6 + Math.random() * 9,
-          (Math.random() - 0.5) * 8,
-          0xdbf4ff,
-          0.75,
+        this.spawnElemParticle(
+          sx + (Math.random() - 0.5) * 1.6,
+          0.6,
+          sz + (Math.random() - 0.5) * 1.6,
+          -_forward.x * 8 + (Math.random() - 0.5) * 11,
+          7 + Math.random() * 10,
+          -_forward.z * 8 + (Math.random() - 0.5) * 11,
+          0xffffff,
+          0xbae6fd,
+          0.48 + Math.random() * 0.25,
+          1.2,
+          3.8,
+          22,
           1.4,
-          4.8,
-          14,
+          2,
         );
       }
       if (rightSkim || bodySkim) {
         const sx = rightSkim ? _v2.x : this.playerPos.x + 4;
         const sz = rightSkim ? _v2.z : this.playerPos.z;
-        this.spawnParticle(
-          sx,
-          0.9,
-          sz,
-          (Math.random() - 0.5) * 8,
-          6 + Math.random() * 9,
-          (Math.random() - 0.5) * 8,
-          0xdbf4ff,
-          0.75,
+        this.spawnElemParticle(
+          sx + (Math.random() - 0.5) * 1.6,
+          0.6,
+          sz + (Math.random() - 0.5) * 1.6,
+          -_forward.x * 8 + (Math.random() - 0.5) * 11,
+          7 + Math.random() * 10,
+          -_forward.z * 8 + (Math.random() - 0.5) * 11,
+          0xffffff,
+          0xbae6fd,
+          0.48 + Math.random() * 0.25,
+          1.2,
+          3.8,
+          22,
           1.4,
-          4.8,
-          14,
+          2,
         );
       }
 
       if (isSlicingCloud) {
-        this.spawnParticle(
+        const wingTrailColor = isSlicingVolcanicCloud ? 0x26211e : 0xe2e8f0;
+        const bodyTrailColor = isSlicingVolcanicCloud ? 0x1c1917 : 0xcbd5e1;
+        this.spawnSmoke(
           _v1.x,
           _v1.y,
           _v1.z,
           -_forward.x * 10 + (Math.random() - 0.5) * 5,
           (Math.random() - 0.5) * 4,
           -_forward.z * 10 + (Math.random() - 0.5) * 5,
-          0xf1f5f9,
-          1.55,
-          3.4,
-          10.5,
-          -0.6,
+          wingTrailColor,
+          isSlicingVolcanicCloud ? 2.1 : 1.75,
+          isSlicingVolcanicCloud ? 4.4 : 3.6,
+          isSlicingVolcanicCloud ? 13.5 : 11.0,
+          0.6,
+          isSlicingVolcanicCloud ? 0.35 : 0,
+          0.7,
         );
-        this.spawnParticle(
+        this.spawnSmoke(
           _v2.x,
           _v2.y,
           _v2.z,
           -_forward.x * 10 + (Math.random() - 0.5) * 5,
           (Math.random() - 0.5) * 4,
           -_forward.z * 10 + (Math.random() - 0.5) * 5,
-          0xf1f5f9,
-          1.55,
-          3.4,
-          10.5,
-          -0.6,
+          wingTrailColor,
+          isSlicingVolcanicCloud ? 2.1 : 1.75,
+          isSlicingVolcanicCloud ? 4.4 : 3.6,
+          isSlicingVolcanicCloud ? 13.5 : 11.0,
+          0.6,
+          isSlicingVolcanicCloud ? 0.35 : 0,
+          0.7,
         );
-        this.spawnParticle(
+        this.spawnSmoke(
           this.playerPos.x,
           this.playerPos.y + 1,
           this.playerPos.z,
           -_forward.x * 14,
           1.2,
           -_forward.z * 14,
-          0xe2e8f0,
-          1.7,
-          4.5,
-          12.0,
-          -0.8,
+          bodyTrailColor,
+          isSlicingVolcanicCloud ? 2.2 : 1.9,
+          isSlicingVolcanicCloud ? 5.6 : 4.6,
+          isSlicingVolcanicCloud ? 16.0 : 13.0,
+          0.8,
+          isSlicingVolcanicCloud ? 0.45 : 0,
+          0.8,
         );
       }
     }
@@ -3091,13 +4122,15 @@ export class DragonEngine {
 
   private completeDragonTouchdown(groundY: number): void {
     this.landingRequested = false;
+    this.diveTuckFactor = 0;
+    this.landingLegExtend = 1;
     this.playerRoll = 0;
     this.playerSpeed = 0;
     this.velocity.set(0, 0, 0);
 
     _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
     this.landedDragonYaw = Math.atan2(-_forward.x, -_forward.z);
-    this.landedDragonPos.set(this.playerPos.x, groundY + 2.15, this.playerPos.z);
+    this.landedDragonPos.set(this.playerPos.x, groundY + 4.0, this.playerPos.z);
     this.landedAnchorPos.copy(this.landedDragonPos);
     this.landedWalkPhase = 0;
     this.landedWalkBlend = 0;
@@ -3110,25 +4143,31 @@ export class DragonEngine {
     this.landedGroundRoll = 0;
     this.landedTurnRate = 0;
     this.playerRig.bodyGroup.position.set(0, 0, 0);
-    this.playerRig.bodyGroup.rotation.set(0, 0, 0);
+    this.playerRig.bodyGroup.rotation.set(0.08, 0, 0);
     this.playerRig.headGroup.rotation.set(0, 0, 0);
+    this.playerRig.leftHindLeg.rotation.x = 0;
+    this.playerRig.rightHindLeg.rotation.x = 0;
+    this.playerRig.leftHindFoot.rotation.x = 0;
+    this.playerRig.rightHindFoot.rotation.x = 0;
 
     // Massive 360-degree wing-downdraft earth dust scatter + dirt/pebble debris
-    for (let i = 0; i < 34; i++) {
-      const a = (i / 34) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
+    for (let i = 0; i < 28; i++) {
+      const a = (i / 28) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
       const spd = 16 + Math.random() * 20;
-      this.spawnParticle(
+      this.spawnSmoke(
         this.landedDragonPos.x + Math.cos(a) * 3.2,
-        groundY + 0.7,
+        groundY + 0.8,
         this.landedDragonPos.z + Math.sin(a) * 3.2,
         Math.cos(a) * spd,
-        2.5 + Math.random() * 6.5,
+        2.5 + Math.random() * 6.0,
         Math.sin(a) * spd,
-        i % 2 === 0 ? 0xb89b72 : 0x8c7355,
-        1.15,
-        3.0,
-        11.2,
-        2.2,
+        i % 2 === 0 ? 0xa88f6c : 0x826c52,
+        1.45,
+        3.6,
+        13.5,
+        1.8,
+        0,
+        0.55,
       );
     }
     _v2.set(this.landedDragonPos.x, groundY + 1.0, this.landedDragonPos.z);
@@ -3137,6 +4176,7 @@ export class DragonEngine {
     this.impactShake = 0.62;
     this.audio.playCrash('stone', false);
     this.audio.playWingbeat();
+    this.audio.speakKnight('landing', true);
 
     // Dismount knight right beside the dragon
     const rightX = Math.cos(this.landedDragonYaw);
@@ -3237,6 +4277,8 @@ export class DragonEngine {
         this.skydiveWaterTimer = 1.95;
         this.impactShake = 0.72;
         this.audio.playCrash('water', true);
+        this.spawnWaterWake(this.riderPos.x, this.riderPos.z, 0, 0, 1.5, 2.5, 22, 0, 1);
+        this.spawnWaterWake(this.riderPos.x, this.riderPos.z, 0, 0, 1.4, 2.0, 14, 1, 1);
         for (let k = 0; k < 28; k++) {
           const ang = (k / 28) * Math.PI * 2;
           const out = 5 + Math.random() * 14;
@@ -3262,7 +4304,7 @@ export class DragonEngine {
         this.activeRiderRig.bodyPivot.rotation.set(0, 0, 0);
         const dLandX = this.riderPos.x - 14;
         const dLandZ = this.riderPos.z - 10;
-        const dLandY = Math.max(0, this.world.getWalkableGroundHeight(dLandX, dLandZ)) + 2.15;
+        const dLandY = Math.max(0, this.world.getWalkableGroundHeight(dLandX, dLandZ)) + 4.0;
         this.landedDragonPos.set(dLandX, dLandY, dLandZ);
         this.landedDragonYaw = Math.atan2(this.riderPos.x - dLandX, this.riderPos.z - dLandZ);
         this.landedAnchorPos.copy(this.landedDragonPos);
@@ -3305,6 +4347,9 @@ export class DragonEngine {
         this.activeRiderRig.leftArm.rotation.set(-0.8 + Math.sin(elapsed * 7) * 0.5, 0, -0.4);
         this.activeRiderRig.rightArm.rotation.set(-0.8 - Math.sin(elapsed * 7) * 0.5, 0, 0.4);
         this.activeRiderRig.cape.rotation.x = 0.75 + Math.sin(elapsed * 4) * 0.12;
+        if (Math.random() < 0.22) {
+          this.spawnWaterWake(this.riderPos.x, this.riderPos.z, 0, 0, 1.1, 2.0, 10, 0, 1);
+        }
         if (Math.random() < 0.28) {
           this.spawnParticle(
             this.riderPos.x + (Math.random() - 0.5) * 2,
@@ -3498,8 +4543,8 @@ export class DragonEngine {
     const stride = Math.sin(this.landedWalkPhase) * 0.42 * this.landedWalkBlend;
     const stepBounce = Math.abs(Math.sin(this.landedWalkPhase)) * 0.24 * this.landedWalkBlend;
 
-    // Upright standing height (2.15m above terrain places hind talons flush on earth)
-    this.landedDragonPos.y = dragonGroundY + 2.15 + stepBounce;
+    // Upright standing height (4.00m above terrain places both forward-toed feet flush on earth, knees high above ground!)
+    this.landedDragonPos.y = dragonGroundY + 4.0 + stepBounce;
     this.playerPos.copy(this.landedDragonPos);
 
     this.playerRig.root.position.copy(this.landedDragonPos);
@@ -3511,18 +4556,26 @@ export class DragonEngine {
     );
     this.playerRig.bodyGroup.position.set(0, breathe * 0.055, 0);
     this.playerRig.bodyGroup.rotation.set(
-      Math.cos(this.landedWalkPhase * 2) * 0.028 * this.landedWalkBlend,
+      0.08 + Math.cos(this.landedWalkPhase * 2) * 0.025 * this.landedWalkBlend,
       0,
       Math.cos(this.landedWalkPhase) * 0.048 * this.landedWalkBlend - this.landedTurnRate * 0.08,
     );
 
-    // Standing upright hind legs with alternating natural walking stride
-    this.playerRig.leftHindLeg.rotation.x = -0.18 + stride;
-    this.playerRig.rightHindLeg.rotation.x = -0.18 - stride;
+    // Standing upright on both clawed feet (not knees!) with alternating natural walking stride & flat foot placement
+    this.playerRig.leftHindLeg.rotation.x = stride;
+    this.playerRig.rightHindLeg.rotation.x = -stride;
+    this.playerRig.leftHindFoot.rotation.x =
+      -stride * 0.85 - Math.max(0, -stride) * 0.28;
+    this.playerRig.rightHindFoot.rotation.x =
+      stride * 0.85 - Math.max(0, stride) * 0.28;
 
     // Wings: grounded folded stance with breathing expansion, gentle balance sway & occasional mantle flex
     const wingMantle = Math.max(0, Math.sin(elapsed * 0.52)) * 0.14;
     const wingWalkSway = Math.sin(this.landedWalkPhase) * 0.05 * this.landedWalkBlend;
+    this.playerRig.leftWingInner.rotation.y = 0;
+    this.playerRig.leftWingOuter.rotation.y = 0;
+    this.playerRig.rightWingInner.rotation.y = 0;
+    this.playerRig.rightWingOuter.rotation.y = 0;
     this.playerRig.leftWingInner.rotation.z =
       -0.62 + breathe * 0.04 + wingMantle + wingWalkSway - this.landedTurnRate * 0.07;
     this.playerRig.leftWingOuter.rotation.z = -0.94 - wingMantle * 0.45 + breathe * 0.03;
@@ -3925,19 +4978,20 @@ export class DragonEngine {
           true,
         );
       }
-      this.spawnParticle(
-        _v1.x,
-        _v1.y,
-        _v1.z,
-        _forward.x * (jetSpeed * 0.78) + (Math.random() - 0.5) * 12,
-        _forward.y * (jetSpeed * 0.78) + (Math.random() - 0.5) * 12,
-        _forward.z * (jetSpeed * 0.78) + (Math.random() - 0.5) * 12,
-        0xc2410c,
-        0.64,
-        1.7,
-        7.5,
-        -4.5,
-        false,
+      this.spawnSmoke(
+        _v1.x + _forward.x * 2.5,
+        _v1.y + _forward.y * 2.5,
+        _v1.z + _forward.z * 2.5,
+        _forward.x * (jetSpeed * 0.56) + (Math.random() - 0.5) * 14,
+        _forward.y * (jetSpeed * 0.56) + 3 + (Math.random() - 0.5) * 10,
+        _forward.z * (jetSpeed * 0.56) + (Math.random() - 0.5) * 14,
+        0x261f1c,
+        1.15,
+        2.6,
+        10.5,
+        4.2,
+        0.78,
+        0.65,
       );
 
       this.applyContinuousConeBreath('fire', 78 + breathRangeBonus, 7.5, 5.5 * breathMul);
@@ -4006,20 +5060,21 @@ export class DragonEngine {
         });
       }
 
-      for (let k = 0; k < 8; k++) {
-        this.spawnParticle(
+      for (let k = 0; k < 6; k++) {
+        this.spawnSmoke(
           _v1.x,
           _v1.y,
           _v1.z,
-          _forward.x * 42 + (Math.random() - 0.5) * 20,
-          _forward.y * 42 + (Math.random() - 0.5) * 20,
-          _forward.z * 42 + (Math.random() - 0.5) * 20,
-          0xf59e0b,
-          0.42,
-          1.8,
-          5.2,
-          4,
-          true,
+          _forward.x * 38 + (Math.random() - 0.5) * 18,
+          _forward.y * 38 + (Math.random() - 0.5) * 18,
+          _forward.z * 38 + (Math.random() - 0.5) * 18,
+          0x4a423b,
+          0.95,
+          2.6,
+          8.2,
+          2.2,
+          0.45,
+          0.4,
         );
       }
     }
@@ -4031,6 +5086,8 @@ export class DragonEngine {
     hitRadius: number,
     damagePerTick: number,
   ): void {
+    const fireConeVfxReady = this.breathImpactVfxTimer <= 0;
+
     // Scorching fire destroys & burns buildings, palm trees, pirate ships, and mountainsides!
     if (element === 'fire') {
       for (const tree of this.world.destructibleTrees) {
@@ -4051,6 +5108,11 @@ export class DragonEngine {
         _closestPt.copy(_v1).addScaledVector(_forward, along);
         if (_closestPt.distanceTo(b.pos) < hitRadius + b.radius + along * 0.06) {
           this.damageBuilding(b, damagePerTick * 0.72, true, _forward, 'fire');
+          if (fireConeVfxReady) {
+            _burstDir.copy(_forward).negate();
+            this.spawnElementalCollisionBurst(_closestPt, _burstDir, 'fire', 0.62, false);
+            this.breathImpactVfxTimer = 0.065;
+          }
         }
       }
       for (const ship of this.world.pirateShips) {
@@ -4061,6 +5123,10 @@ export class DragonEngine {
         _closestPt.copy(_v1).addScaledVector(_forward, along);
         if (_closestPt.distanceTo(ship.group.position) < hitRadius + 16 + along * 0.06) {
           this.damageShip(ship, damagePerTick * 0.75, 'fire', _forward);
+          if (fireConeVfxReady) {
+            this.spawnElementalCollisionBurst(_closestPt, _unitY, 'fire', 0.68, false);
+            this.breathImpactVfxTimer = 0.065;
+          }
         }
       }
       // Fire jet sweeping close across mountain slopes chars & slightly gouges terrain
@@ -4069,6 +5135,11 @@ export class DragonEngine {
         const gY = getTerrainHeight(_closestPt.x, _closestPt.z);
         if (gY > 0.5 && _closestPt.y < gY + 7.5 && _closestPt.y > gY - 8) {
           this.world.deformTerrain(_closestPt.x, _closestPt.z, 11, 0.35, 0.9);
+          if (fireConeVfxReady) {
+            _closestPt.y = gY + 0.5;
+            this.spawnElementalCollisionBurst(_closestPt, _unitY, 'fire', 0.55, false);
+            this.breathImpactVfxTimer = 0.07;
+          }
           break;
         }
       }
@@ -4082,6 +5153,10 @@ export class DragonEngine {
         _closestPt.copy(_v1).addScaledVector(_forward, along);
         if (_closestPt.distanceTo(ship.group.position) < hitRadius + 16 + along * 0.06) {
           this.damageShip(ship, damagePerTick * 0.35, 'ice', _forward);
+          if (fireConeVfxReady) {
+            this.spawnElementalCollisionBurst(_closestPt, _unitY, 'ice', 0.65, false);
+            this.breathImpactVfxTimer = 0.065;
+          }
         }
       }
     }
@@ -4100,25 +5175,14 @@ export class DragonEngine {
         if (element === 'fire') {
           ai.burnTimer = 4.0;
           ai.frozenTimer = Math.max(0, ai.frozenTimer - 0.5);
-          if (Math.random() < 0.65) {
-            this.spawnParticle(
-              ai.pos.x + (Math.random() - 0.5) * 3,
-              ai.pos.y + (Math.random() - 0.5) * 2,
-              ai.pos.z + (Math.random() - 0.5) * 3,
-              (Math.random() - 0.5) * 10,
-              6 + Math.random() * 8,
-              (Math.random() - 0.5) * 10,
-              0xff7700,
-              0.4,
-              2.0,
-              5.4,
-              -2,
-              true,
-            );
-          }
         } else {
           ai.frozenTimer = 4.2;
           ai.rig.setFrozen(true);
+        }
+        if (this.breathImpactVfxTimer <= 0) {
+          _burstDir.copy(_forward).negate();
+          this.spawnElementalCollisionBurst(ai.pos, _burstDir, element, 0.72, true);
+          this.breathImpactVfxTimer = 0.06;
         }
 
         if (ai.hp <= 0) {
@@ -4149,20 +5213,21 @@ export class DragonEngine {
         ai.rig.rightWingInner.rotation.z = 0.35 - limpFlap;
         ai.rig.rightWingOuter.rotation.z = 0.65 + limpFlap;
 
-        if (Math.random() < 0.6) {
-          this.spawnParticle(
+        if (Math.random() < 0.72) {
+          this.spawnSmoke(
             ai.pos.x,
             ai.pos.y,
             ai.pos.z,
-            (Math.random() - 0.5) * 4,
-            3 + Math.random() * 5,
-            (Math.random() - 0.5) * 4,
-            Math.random() < 0.35 ? 0xf97316 : 0x334155,
-            0.95,
-            2.2,
-            7.2,
-            -1.2,
-            false,
+            (Math.random() - 0.5) * 5,
+            3.5 + Math.random() * 5,
+            (Math.random() - 0.5) * 5,
+            0x272321,
+            2.1,
+            3.8,
+            14.0,
+            3.4,
+            0.65,
+            0.85,
           );
         }
 
@@ -4190,19 +5255,21 @@ export class DragonEngine {
             this.spawnDebris(ai.pos, 15, 'stone', 24, 1.05, ai.fallVel);
             this.spawnDebris(ai.pos, 6, 'ember', 18, 0.85);
           }
-          for (let k = 0; k < 22; k++) {
-            this.spawnParticle(
+          for (let k = 0; k < 18; k++) {
+            this.spawnSmoke(
               ai.pos.x + (Math.random() - 0.5) * 6,
               hitY + 1.2,
               ai.pos.z + (Math.random() - 0.5) * 6,
-              (Math.random() - 0.5) * 22,
-              8 + Math.random() * 14,
-              (Math.random() - 0.5) * 22,
-              overWater ? 0xdbf4ff : 0x786c5e,
-              1.05,
+              (Math.random() - 0.5) * 20,
+              4 + Math.random() * 10,
+              (Math.random() - 0.5) * 20,
+              overWater ? 0xcfe8f7 : 0x5c5349,
+              1.9,
+              4.2,
+              15.5,
               2.6,
-              8.8,
-              14,
+              overWater ? 0 : 0.35,
+              0.8,
             );
           }
         }
@@ -4275,8 +5342,10 @@ export class DragonEngine {
           ai.rig.leftWingOuter.rotation.z = -1.15;
           ai.rig.rightWingInner.rotation.z = 1.08;
           ai.rig.rightWingOuter.rotation.z = 1.15;
-          ai.rig.leftHindLeg.rotation.x = -0.88;
-          ai.rig.rightHindLeg.rotation.x = -0.88;
+          ai.rig.leftHindLeg.rotation.x = -0.78;
+          ai.rig.rightHindLeg.rotation.x = -0.78;
+          ai.rig.leftHindFoot.rotation.x = 0.35;
+          ai.rig.rightHindFoot.rotation.x = 0.35;
           if (ai.roostTimer <= 0) {
             ai.roostState = 'flying';
             ai.roostTimer = 14 + Math.random() * 10;
@@ -4415,17 +5484,54 @@ export class DragonEngine {
       ai.rig.root.position.copy(ai.pos);
       ai.rig.root.quaternion.copy(_quatA);
 
+      if (ai.clashTimer > 0) ai.clashTimer = Math.max(0, ai.clashTimer - dt);
+
+      const distToTarget = targetPos !== _v3 ? ai.pos.distanceTo(targetPos) : 999;
+      const aiTalonReady =
+        ai.clashTimer > 0 || (this.mode === 'combat' && distToTarget < 24);
       const flap = Math.sin(elapsed * 6.2 + ai.patrolSeed);
-      ai.rig.leftWingInner.rotation.z = flap * 0.45;
-      ai.rig.leftWingOuter.rotation.z = Math.sin(elapsed * 6.2 + ai.patrolSeed - 0.6) * 0.4;
-      ai.rig.rightWingInner.rotation.z = -flap * 0.45;
-      ai.rig.rightWingOuter.rotation.z = -Math.sin(elapsed * 6.2 + ai.patrolSeed - 0.6) * 0.4;
-      ai.rig.leftHindLeg.rotation.x = 0.4 + flap * 0.08;
-      ai.rig.rightHindLeg.rotation.x = 0.4 - flap * 0.08;
+      const diveTuckAi = desiredPitch < -0.22 ? THREE.MathUtils.clamp((-desiredPitch - 0.22) * 2.1, 0, 1) : 0;
+      ai.rig.leftWingInner.rotation.y = 0.9 * diveTuckAi;
+      ai.rig.leftWingOuter.rotation.y = 0.3 * diveTuckAi;
+      ai.rig.rightWingInner.rotation.y = -0.9 * diveTuckAi;
+      ai.rig.rightWingOuter.rotation.y = -0.3 * diveTuckAi;
+      ai.rig.leftWingInner.rotation.z = flap * 0.45 * (1 - diveTuckAi * 0.85) + 0.2 * diveTuckAi;
+      ai.rig.leftWingOuter.rotation.z = Math.sin(elapsed * 6.2 + ai.patrolSeed - 0.6) * 0.4 * (1 - diveTuckAi * 0.85) - 0.45 * diveTuckAi;
+      ai.rig.rightWingInner.rotation.z = -flap * 0.45 * (1 - diveTuckAi * 0.85) - 0.2 * diveTuckAi;
+      ai.rig.rightWingOuter.rotation.z = -Math.sin(elapsed * 6.2 + ai.patrolSeed - 0.6) * 0.4 * (1 - diveTuckAi * 0.85) + 0.45 * diveTuckAi;
+
+      const aiKick = ai.clashTimer > 0 ? Math.sin(elapsed * 26 + ai.patrolSeed) * 0.34 : 0;
+      const aiLegBase = aiTalonReady ? -0.78 : 0.52;
+      const aiFootBase = aiTalonReady ? -0.18 : 0.46;
+      ai.rig.leftHindLeg.rotation.x = aiLegBase + flap * 0.08 + aiKick;
+      ai.rig.rightHindLeg.rotation.x = aiLegBase - flap * 0.08 - aiKick;
+      ai.rig.leftHindFoot.rotation.x = aiFootBase;
+      ai.rig.rightHindFoot.rotation.x = aiFootBase;
+
+      // AI-vs-AI Aerial Talon Clash in Combat Mode
+      if (this.mode === 'combat' && ai.clashTimer <= 0) {
+        for (const other of this.aiDragons) {
+          if (!other.alive || other.team === ai.team || other.clashTimer > 0) continue;
+          if (ai.pos.distanceToSquared(other.pos) < 10.5 * 10.5) {
+            ai.clashTimer = 0.72;
+            other.clashTimer = 0.72;
+            ai.hp -= 12 + Math.random() * 8;
+            other.hp -= 12 + Math.random() * 8;
+            _v2.copy(ai.pos).add(other.pos).multiplyScalar(0.5);
+            this.spawnElementalCollisionBurst(_v2, _unitY, DRAGON_SPECS[ai.specId].element, 0.78, true);
+            if (ai.pos.distanceTo(this.playerPos) < 280) {
+              this.audio.playRoar(DRAGON_SPECS[ai.specId].element, 0.55, 0.75);
+            }
+            if (other.hp <= 0) this.killEnemyDragon(other, false);
+            if (ai.hp <= 0) this.killEnemyDragon(ai, false);
+            break;
+          }
+        }
+      }
+      if (!ai.alive) continue;
 
       if (this.mode === 'combat' && targetPos !== _v3) {
         ai.fireCooldown -= dt;
-        const distToTarget = ai.pos.distanceTo(targetPos);
         const maxRange = attackingKingdom ? 240 : 190;
         if (ai.fireCooldown <= 0 && distToTarget < maxRange && Math.abs(diffYaw) < 0.48) {
           ai.fireCooldown = 1.6 + Math.random() * 1.4;
@@ -4541,8 +5647,11 @@ export class DragonEngine {
       }
 
       let hit = false;
+      let hitDragon = false;
+      _normal.copy(p.vel).negate().normalize();
+
       if (p.ownerTeam === 'ally') {
-        // Destructibles vs player projectiles (scattered rocks, etc.)
+        // Destructibles vs player/ally projectiles
         for (const tree of this.world.destructibleTrees) {
           if (tree.destroyed) continue;
           const dx = p.mesh.position.x - tree.pos.x;
@@ -4553,6 +5662,7 @@ export class DragonEngine {
             p.mesh.position.y <= tree.pos.y + tree.height + 2
           ) {
             this.destroyTree(tree);
+            _normal.set(dx, 0.35, dz).normalize();
             hit = true;
             break;
           }
@@ -4567,6 +5677,7 @@ export class DragonEngine {
               Math.abs(p.mesh.position.y - b.pos.y) < b.height * 0.55 + p.radius
             ) {
               this.damageBuilding(b, p.damage * 1.45, true, p.vel, p.element);
+              _normal.set(dx, 0.35, dz).normalize();
               hit = true;
               break;
             }
@@ -4584,6 +5695,7 @@ export class DragonEngine {
               p.mesh.position.y > -2
             ) {
               this.damageShip(ship, p.damage * 1.6, p.element, p.vel);
+              _normal.set(dx * 0.3, 1, dz * 0.3).normalize();
               hit = true;
               break;
             }
@@ -4597,9 +5709,19 @@ export class DragonEngine {
           if (p.mesh.position.distanceTo(ai.pos) < p.radius + 4.8) {
             const bonus = ai.frozenTimer > 0 ? 1.5 : 1.0;
             ai.hp -= p.damage * bonus;
-            if (p.element === 'ice') ai.frozenTimer = 4.0;
-            if (p.element === 'fire') ai.burnTimer = 3.0;
+            if (p.element === 'ice') {
+              ai.frozenTimer = 4.0;
+              ai.rig.setFrozen(true);
+            }
+            if (p.element === 'fire') {
+              ai.burnTimer = 3.0;
+              ai.frozenTimer = Math.max(0, ai.frozenTimer - 0.5);
+            }
+            _normal.copy(p.mesh.position).sub(ai.pos);
+            if (_normal.lengthSq() > 0.001) _normal.normalize();
+            else _normal.copy(_unitY);
             hit = true;
+            hitDragon = true;
             if (ai.hp <= 0) {
               this.killEnemyDragon(ai, false);
             }
@@ -4617,8 +5739,28 @@ export class DragonEngine {
             Math.abs(p.mesh.position.y - b.pos.y) < b.height * 0.55 + p.radius
           ) {
             this.damageBuilding(b, p.damage, false, p.vel, p.element);
+            _normal.set(dx, 0.35, dz).normalize();
             hit = true;
             break;
+          }
+        }
+        if (!hit) {
+          for (const ai of this.aiDragons) {
+            if (!ai.alive || ai.team !== 'ally') continue;
+            if (p.mesh.position.distanceTo(ai.pos) < p.radius + 4.5) {
+              ai.hp -= p.damage * 0.55;
+              if (p.element === 'ice') ai.slowTimer = 3.0;
+              if (p.element === 'fire') ai.burnTimer = 2.4;
+              _normal.copy(p.mesh.position).sub(ai.pos);
+              if (_normal.lengthSq() > 0.001) _normal.normalize();
+              else _normal.copy(_unitY);
+              hit = true;
+              hitDragon = true;
+              if (ai.hp <= 0) {
+                this.killEnemyDragon(ai, false);
+              }
+              break;
+            }
           }
         }
         if (!hit && this.phase === 'flying' && !this.playerCrashing) {
@@ -4627,7 +5769,11 @@ export class DragonEngine {
             this.hp = Math.max(0, this.hp - p.damage * armorMul);
             this.woundsCount = Math.min(5, this.woundsCount + 1);
             this.triggerDirectionalDangerHorn(p.mesh.position);
+            _normal.copy(p.mesh.position).sub(this.playerPos);
+            if (_normal.lengthSq() > 0.001) _normal.normalize();
+            else _normal.copy(_unitY);
             hit = true;
+            hitDragon = true;
             if (this.hp <= 0) {
               this.playerCrashing = true;
               this.playerCrashTimer = 0;
@@ -4641,6 +5787,7 @@ export class DragonEngine {
       const gY = getTerrainHeight(p.mesh.position.x, p.mesh.position.z);
       if (p.mesh.position.y <= Math.max(0, gY)) {
         hit = true;
+        _normal.copy(_unitY);
         if (gY > -0.4) {
           if (p.element === 'rock') {
             this.world.deformTerrain(p.mesh.position.x, p.mesh.position.z, 14, 3.8, 0.65);
@@ -4656,23 +5803,13 @@ export class DragonEngine {
 
       if (hit || p.life <= 0) {
         if (hit) {
-          const burstCol =
-            p.element === 'fire' ? 0xff5500 : p.element === 'ice' ? 0xffffff : 0xf59e0b;
-          for (let k = 0; k < 8; k++) {
-            this.spawnParticle(
-              p.mesh.position.x,
-              p.mesh.position.y,
-              p.mesh.position.z,
-              (Math.random() - 0.5) * 16,
-              (Math.random() - 0.5) * 16,
-              (Math.random() - 0.5) * 16,
-              burstCol,
-              0.45,
-              1.6,
-              4.2,
-              4,
-            );
-          }
+          this.spawnElementalCollisionBurst(
+            p.mesh.position,
+            _normal,
+            p.element,
+            hitDragon ? 1.18 : p.element === 'rock' ? 1.15 : 0.95,
+            hitDragon,
+          );
         }
         this.scene.remove(p.mesh);
         this.projectiles.splice(i, 1);
@@ -4735,6 +5872,1101 @@ export class DragonEngine {
       p.sprite.scale.setScalar(s);
       p.sprite.material.opacity = (1 - t) * 0.82;
     }
+  }
+
+  private initSmokeSystem(): void {
+    this.smokeTex = createRealisticSmokeTexture(this.maxAnisotropy);
+    this.smokePool = [];
+    for (let i = 0; i < MAX_SMOKE; i++) {
+      this.smokePool.push({
+        active: false,
+        x: 0,
+        y: -9999,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        r: 0.2,
+        g: 0.2,
+        b: 0.2,
+        life: 0,
+        maxLife: 1,
+        startScale: 1,
+        endScale: 4,
+        buoyancy: 2,
+        fireGlow: 0,
+        windMul: 1,
+        angle: 0,
+        angVel: 0,
+        seed: i * 1.37,
+      });
+    }
+
+    const baseQuad = new THREE.PlaneGeometry(1, 1);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = baseQuad.index;
+    geo.attributes.position = baseQuad.attributes.position;
+    geo.attributes.uv = baseQuad.attributes.uv;
+    baseQuad.dispose();
+
+    this.smokePosScaleAttr = new THREE.InstancedBufferAttribute(this.smokePosScaleArr, 4);
+    this.smokePosScaleAttr.setUsage(THREE.DynamicDrawUsage);
+    this.smokeTintAttr = new THREE.InstancedBufferAttribute(this.smokeTintArr, 3);
+    this.smokeTintAttr.setUsage(THREE.DynamicDrawUsage);
+    this.smokeParamsAttr = new THREE.InstancedBufferAttribute(this.smokeParamsArr, 4);
+    this.smokeParamsAttr.setUsage(THREE.DynamicDrawUsage);
+
+    geo.setAttribute('aSmokePosScale', this.smokePosScaleAttr);
+    geo.setAttribute('aSmokeTint', this.smokeTintAttr);
+    geo.setAttribute('aSmokeParams', this.smokeParamsAttr);
+    geo.instanceCount = MAX_SMOKE;
+
+    this.smokeMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: this.smokeTex },
+        uSunDir: { value: new THREE.Vector3(240, 175, -210).normalize() },
+        uTime: { value: 0 },
+        uStormFactor: { value: 0 },
+        uLightning: { value: 0 },
+      },
+      vertexShader: `
+        attribute vec4 aSmokePosScale;
+        attribute vec3 aSmokeTint;
+        attribute vec4 aSmokeParams;
+        uniform float uTime;
+        varying vec2 vUv;
+        varying vec3 vTint;
+        varying vec4 vParams;
+        varying float vViewDist;
+        varying vec3 vSunLocal;
+
+        void main() {
+          vUv = uv;
+          vTint = aSmokeTint;
+          vParams = aSmokeParams;
+
+          float scale = aSmokePosScale.w;
+          if (scale <= 0.001) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            vViewDist = 9999.0;
+            vSunLocal = vec3(0.0, 1.0, 0.0);
+            return;
+          }
+
+          float ang = aSmokeParams.x;
+          float c = cos(ang);
+          float s = sin(ang);
+          vec2 rotPos = vec2(
+            position.x * c - position.y * s,
+            position.x * s + position.y * c
+          );
+
+          vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+          vec3 camUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+          vec3 camFwd   = -vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]);
+
+          float breathe = 1.0 + sin(uTime * 2.1 + aSmokeParams.w * 7.3) * 0.035;
+          vec3 worldPos = aSmokePosScale.xyz + (camRight * rotPos.x + camUp * rotPos.y) * (scale * breathe);
+
+          // Express sun vector in billboard UV tangent space for realistic self-shadowing
+          vSunLocal = vec3(
+            dot(camRight, normalize(vec3(0.65, 0.48, -0.58))),
+            dot(camUp, normalize(vec3(0.65, 0.48, -0.58))),
+            dot(camFwd, normalize(vec3(0.65, 0.48, -0.58)))
+          );
+
+          vec4 mvPos = viewMatrix * vec4(worldPos, 1.0);
+          vViewDist = -mvPos.z;
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uMap;
+        uniform float uTime;
+        uniform float uStormFactor;
+        uniform float uLightning;
+        varying vec2 vUv;
+        varying vec3 vTint;
+        varying vec4 vParams;
+        varying float vViewDist;
+        varying vec3 vSunLocal;
+
+        void main() {
+          float lifeFrac = clamp(vParams.y, 0.0, 1.0);
+          float fireGlow = vParams.z;
+          float seed = vParams.w;
+
+          // Counter-rotating turbulent curl advection inside each puff
+          vec2 driftA = vec2(uTime * 0.055 + seed * 0.31, -uTime * 0.085 - lifeFrac * 0.24);
+          vec2 driftB = vec2(-uTime * 0.045 + seed * 0.71, -uTime * 0.065 + lifeFrac * 0.16);
+          vec4 baseSample = texture2D(uMap, vUv + driftA * 0.18);
+          vec4 eddySample = texture2D(uMap, vUv * 1.18 + driftB * 0.22 + (baseSample.rg - 0.5) * 0.14);
+
+          float dome = mix(baseSample.r, eddySample.r, 0.45);
+          float tendrils = mix(baseSample.g, eddySample.g, 0.55);
+          float core = mix(baseSample.b, eddySample.b, 0.4);
+          float rawAlpha = baseSample.a * mix(0.68, 1.18, eddySample.a);
+
+          // Wispy edge erosion as puff expands & disperses
+          float erodeMin = lifeFrac * 0.46;
+          float erodeMax = 0.52 + lifeFrac * 0.48;
+          float wispyMask = smoothstep(erodeMin, erodeMax, rawAlpha * 0.85 + tendrils * 0.28);
+
+          // Fade in quickly on emission, dissolve organically on dissipation
+          float lifeFade = smoothstep(0.0, 0.11, lifeFrac) * (1.0 - smoothstep(0.32, 1.0, lifeFrac));
+          float nearFade = smoothstep(3.0, 14.0, vViewDist);
+          float distFade = exp(-vViewDist * 0.00022);
+
+          float finalAlpha = clamp(wispyMask * rawAlpha * lifeFade * nearFade * distFade * 0.94, 0.0, 0.92);
+          if (finalAlpha < 0.006) discard;
+
+          // 3D Billow dome self-shadowing toward solar azimuth
+          vec2 radialVec = (vUv - 0.5) * 2.0;
+          vec2 sun2D = normalize(vSunLocal.xy + vec2(0.001, 0.12));
+          float sunDot = dot(radialVec, sun2D) * 0.5 + 0.5;
+          float sunHighlight = clamp(dome * 0.65 + sunDot * 0.45 - core * 0.22, 0.0, 1.0);
+
+          vec3 shadowTone = vTint * mix(0.34, 0.55, 1.0 - core);
+          vec3 litTone = mix(vTint * 1.35 + vec3(0.18, 0.15, 0.12), vec3(0.84, 0.8, 0.75), 0.26);
+          litTone = mix(litTone, vTint * 0.72, uStormFactor * 0.65);
+
+          vec3 col = mix(shadowTone, litTone, smoothstep(0.18, 0.88, sunHighlight));
+
+          // Internal warm fire/ember scattering from flames underneath
+          float emberCore = core * pow(max(0.0, 1.0 - lifeFrac * 1.25), 1.35) * (0.45 + tendrils * 0.75);
+          col += vec3(1.0, 0.42, 0.09) * fireGlow * emberCore * 1.45;
+
+          // Storm lightning flash rim illumination
+          col += vec3(0.65, 0.82, 1.0) * uLightning * (0.22 + 0.45 * dome);
+
+          gl_FragColor = vec4(col, finalAlpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this.smokeGeo = geo;
+    this.smokeMesh = new THREE.Mesh(this.smokeGeo, this.smokeMat);
+    this.smokeMesh.frustumCulled = false;
+    this.smokeMesh.renderOrder = 6;
+    this.scene.add(this.smokeMesh);
+  }
+
+  private spawnSmoke(
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vy: number,
+    vz: number,
+    colorHex: number,
+    maxLife: number,
+    startScale: number,
+    endScale: number,
+    buoyancy: number,
+    fireGlow = 0,
+    windMul = 1,
+  ): void {
+    const p = this.smokePool[this.smokeCursor];
+    this.smokeCursor = (this.smokeCursor + 1) % MAX_SMOKE;
+    _smokeColorTmp.setHex(colorHex);
+    p.active = true;
+    p.x = x;
+    p.y = y;
+    p.z = z;
+    p.vx = vx;
+    p.vy = vy;
+    p.vz = vz;
+    p.r = _smokeColorTmp.r;
+    p.g = _smokeColorTmp.g;
+    p.b = _smokeColorTmp.b;
+    p.life = maxLife;
+    p.maxLife = maxLife;
+    p.startScale = startScale;
+    p.endScale = endScale;
+    p.buoyancy = buoyancy;
+    p.fireGlow = fireGlow;
+    p.windMul = windMul;
+    p.angle = Math.random() * Math.PI * 2;
+    p.angVel = (Math.random() - 0.5) * 0.95;
+    p.seed = Math.random() * 100;
+  }
+
+  private updateSmoke(dt: number, elapsed: number): void {
+    const windX = (2.6 + this.stormIntensity * 8.5) * dt;
+    const windZ = (1.5 + this.stormIntensity * 5.0) * dt;
+
+    for (let i = 0; i < MAX_SMOKE; i++) {
+      const p = this.smokePool[i];
+      const i4 = i * 4;
+      const i3 = i * 3;
+      if (!p.active) {
+        this.smokePosScaleArr[i4 + 3] = 0;
+        continue;
+      }
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.active = false;
+        this.smokePosScaleArr[i4 + 3] = 0;
+        continue;
+      }
+
+      const lifeFrac = 1 - p.life / p.maxLife;
+      const drag = Math.exp(-0.92 * dt);
+      p.vx *= drag;
+      p.vz *= drag;
+      p.vy = p.vy * Math.exp(-0.45 * dt) + p.buoyancy * dt;
+
+      // Subtle curling eddy drift as plume ascends
+      const curl = Math.sin(elapsed * 1.8 + p.seed + lifeFrac * 5.0) * 1.4 * dt;
+      p.x += p.vx * dt + windX * p.windMul + curl;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt + windZ * p.windMul - curl * 0.7;
+      p.angle += p.angVel * dt;
+
+      const easeOut = 1 - (1 - lifeFrac) * (1 - lifeFrac);
+      const scale = THREE.MathUtils.lerp(p.startScale, p.endScale, easeOut);
+
+      this.smokePosScaleArr[i4] = p.x;
+      this.smokePosScaleArr[i4 + 1] = p.y;
+      this.smokePosScaleArr[i4 + 2] = p.z;
+      this.smokePosScaleArr[i4 + 3] = scale;
+
+      this.smokeTintArr[i3] = p.r;
+      this.smokeTintArr[i3 + 1] = p.g;
+      this.smokeTintArr[i3 + 2] = p.b;
+
+      this.smokeParamsArr[i4] = p.angle;
+      this.smokeParamsArr[i4 + 1] = lifeFrac;
+      this.smokeParamsArr[i4 + 2] = p.fireGlow;
+      this.smokeParamsArr[i4 + 3] = p.seed;
+    }
+
+    this.smokePosScaleAttr.needsUpdate = true;
+    this.smokeTintAttr.needsUpdate = true;
+    this.smokeParamsAttr.needsUpdate = true;
+  }
+
+  private initElemParticleSystem(): void {
+    this.elemPool = [];
+    for (let i = 0; i < MAX_ELEM_PARTICLES; i++) {
+      this.elemPool.push({
+        active: false,
+        x: 0,
+        y: -9999,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        r0: 1,
+        g0: 0.7,
+        b0: 0.3,
+        r1: 1,
+        g1: 0.2,
+        b1: 0.05,
+        life: 0,
+        maxLife: 0.5,
+        startScale: 1,
+        endScale: 3,
+        gravity: 0,
+        drag: 2.0,
+        angle: 0,
+        angVel: 0,
+        kind: 0,
+      });
+    }
+
+    const baseQuad = new THREE.PlaneGeometry(1, 1);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = baseQuad.index;
+    geo.attributes.position = baseQuad.attributes.position;
+    geo.attributes.uv = baseQuad.attributes.uv;
+    baseQuad.dispose();
+
+    this.elemPosScaleAttr = new THREE.InstancedBufferAttribute(this.elemPosScaleArr, 4);
+    this.elemPosScaleAttr.setUsage(THREE.DynamicDrawUsage);
+    this.elemCol0Attr = new THREE.InstancedBufferAttribute(this.elemCol0Arr, 3);
+    this.elemCol0Attr.setUsage(THREE.DynamicDrawUsage);
+    this.elemCol1Attr = new THREE.InstancedBufferAttribute(this.elemCol1Arr, 3);
+    this.elemCol1Attr.setUsage(THREE.DynamicDrawUsage);
+    this.elemParamsAttr = new THREE.InstancedBufferAttribute(this.elemParamsArr, 4);
+    this.elemParamsAttr.setUsage(THREE.DynamicDrawUsage);
+
+    geo.setAttribute('aElemPosScale', this.elemPosScaleAttr);
+    geo.setAttribute('aElemCol0', this.elemCol0Attr);
+    geo.setAttribute('aElemCol1', this.elemCol1Attr);
+    geo.setAttribute('aElemParams', this.elemParamsAttr);
+    geo.instanceCount = MAX_ELEM_PARTICLES;
+
+    this.elemMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+      },
+      vertexShader: `
+        attribute vec4 aElemPosScale;
+        attribute vec3 aElemCol0;
+        attribute vec3 aElemCol1;
+        attribute vec4 aElemParams;
+        varying vec2 vUv;
+        varying vec3 vCol0;
+        varying vec3 vCol1;
+        varying vec4 vParams;
+        varying float vViewDist;
+
+        void main() {
+          vUv = uv;
+          vCol0 = aElemCol0;
+          vCol1 = aElemCol1;
+          vParams = aElemParams;
+
+          float scale = aElemPosScale.w;
+          if (scale <= 0.001) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            vViewDist = 9999.0;
+            return;
+          }
+
+          float ang = aElemParams.x;
+          float c = cos(ang);
+          float s = sin(ang);
+          vec2 rotPos = vec2(
+            position.x * c - position.y * s,
+            position.x * s + position.y * c
+          );
+
+          vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+          vec3 camUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+          vec3 worldPos = aElemPosScale.xyz + (camRight * rotPos.x + camUp * rotPos.y) * scale;
+
+          vec4 mvPos = viewMatrix * vec4(worldPos, 1.0);
+          vViewDist = -mvPos.z;
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        varying vec2 vUv;
+        varying vec3 vCol0;
+        varying vec3 vCol1;
+        varying vec4 vParams;
+        varying float vViewDist;
+
+        void main() {
+          float lifeFrac = clamp(vParams.y, 0.0, 1.0);
+          float kind = vParams.z;
+          vec2 p = (vUv - 0.5) * 2.0;
+          float r = length(p);
+          if (r > 1.0) discard;
+
+          float shape = 0.0;
+          if (kind < 0.5) {
+            // Kind 0: Intense blazing plasma/ember orb with bright hot nucleus
+            float core = exp(-r * r * 7.8);
+            float halo = pow(max(0.0, 1.0 - r), 1.9);
+            float flicker = 0.86 + 0.14 * sin(uTime * 19.0 + vParams.w);
+            shape = (core * 1.15 + halo * 0.58) * flicker;
+          } else if (kind < 1.5) {
+            // Kind 1: Faceted crystal shard / razor spark needle
+            float diamond = abs(p.x) * 3.1 + abs(p.y) * 0.92;
+            float shard = smoothstep(1.0, 0.16, diamond);
+            float glint = exp(-diamond * diamond * 4.5);
+            shape = shard * 0.72 + glint * 0.95;
+          } else {
+            // Kind 2: Expanding elemental shock halo / cryo mist wave
+            float ring = smoothstep(0.98, 0.62, r) * smoothstep(0.18, 0.68, r);
+            float softFill = smoothstep(0.96, 0.05, r) * 0.42;
+            shape = ring * 0.85 + softFill;
+          }
+
+          float fadeIn = smoothstep(0.0, 0.06, lifeFrac);
+          float fadeOut = pow(max(0.0, 1.0 - lifeFrac), 1.32);
+          float nearFade = smoothstep(1.2, 5.5, vViewDist);
+          float alpha = clamp(shape * fadeIn * fadeOut * nearFade, 0.0, 1.0);
+          if (alpha < 0.008) discard;
+
+          vec3 col = mix(vCol0, vCol1, smoothstep(0.0, 0.85, lifeFrac));
+          gl_FragColor = vec4(col, alpha);
+        }
+      `,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this.elemGeo = geo;
+    this.elemMesh = new THREE.Mesh(this.elemGeo, this.elemMat);
+    this.elemMesh.frustumCulled = false;
+    this.elemMesh.renderOrder = 7;
+    this.scene.add(this.elemMesh);
+  }
+
+  private spawnElemParticle(
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vy: number,
+    vz: number,
+    colorStartHex: number,
+    colorEndHex: number,
+    maxLife: number,
+    startScale: number,
+    endScale: number,
+    gravity: number,
+    drag: number,
+    kind: 0 | 1 | 2,
+    angle = Math.random() * Math.PI * 2,
+    angVel = (Math.random() - 0.5) * 8,
+  ): void {
+    const p = this.elemPool[this.elemCursor];
+    this.elemCursor = (this.elemCursor + 1) % MAX_ELEM_PARTICLES;
+    _elemColorA.setHex(colorStartHex);
+    _elemColorB.setHex(colorEndHex);
+    p.active = true;
+    p.x = x;
+    p.y = y;
+    p.z = z;
+    p.vx = vx;
+    p.vy = vy;
+    p.vz = vz;
+    p.r0 = _elemColorA.r;
+    p.g0 = _elemColorA.g;
+    p.b0 = _elemColorA.b;
+    p.r1 = _elemColorB.r;
+    p.g1 = _elemColorB.g;
+    p.b1 = _elemColorB.b;
+    p.life = maxLife;
+    p.maxLife = maxLife;
+    p.startScale = startScale;
+    p.endScale = endScale;
+    p.gravity = gravity;
+    p.drag = drag;
+    p.kind = kind;
+    p.angle = angle;
+    p.angVel = angVel;
+  }
+
+  private spawnElementalCollisionBurst(
+    pos: THREE.Vector3,
+    normal: THREE.Vector3,
+    element: ElementType,
+    intensity = 1.0,
+    isDragonHit = false,
+  ): void {
+    _burstNorm.copy(normal);
+    if (_burstNorm.lengthSq() > 0.001) {
+      _burstNorm.normalize();
+    } else {
+      _burstNorm.set(0, 1, 0);
+    }
+
+    // Orthonormal tangent frame around impact normal (zero GC)
+    if (Math.abs(_burstNorm.y) < 0.92) {
+      _burstTanA.crossVectors(_burstNorm, _unitY).normalize();
+    } else {
+      _burstTanA.crossVectors(_burstNorm, _unitX).normalize();
+    }
+    _burstTanB.crossVectors(_burstNorm, _burstTanA).normalize();
+
+    const scaleMul = intensity * (isDragonHit ? 1.18 : 1.0);
+
+    if (element === 'fire') {
+      this.triggerVfxFlash(pos, 0xff7b1c, 0.95 * intensity);
+      this.spawnShockwaveRing(
+        pos,
+        _burstNorm,
+        1.5 * intensity,
+        (isDragonHit ? 13.5 : 10.5) * intensity,
+        0xff6b1a,
+        0.4,
+      );
+      this.spawnSparkBurst(pos, _burstNorm, Math.round(12 * intensity), 0xffad33, 1.15);
+
+      const orbCount = Math.round(14 * intensity);
+      for (let i = 0; i < orbCount; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spread = 0.35 + Math.random() * 0.95;
+        _burstDir
+          .copy(_burstNorm)
+          .multiplyScalar(0.55 + Math.random() * 0.65)
+          .addScaledVector(_burstTanA, Math.cos(ang) * spread)
+          .addScaledVector(_burstTanB, Math.sin(ang) * spread)
+          .normalize();
+        const spd = (14 + Math.random() * 24) * scaleMul;
+        this.spawnElemParticle(
+          pos.x + (Math.random() - 0.5) * 1.6,
+          pos.y + (Math.random() - 0.5) * 1.6,
+          pos.z + (Math.random() - 0.5) * 1.6,
+          _burstDir.x * spd,
+          _burstDir.y * spd + 3,
+          _burstDir.z * spd,
+          0xfff3b0,
+          0xff4800,
+          0.38 + Math.random() * 0.34,
+          (1.6 + Math.random() * 1.2) * scaleMul,
+          (4.6 + Math.random() * 2.8) * scaleMul,
+          -10,
+          2.6,
+          0,
+        );
+      }
+
+      const needleCount = Math.round(16 * intensity);
+      for (let i = 0; i < needleCount; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spread = 0.5 + Math.random() * 1.2;
+        _burstDir
+          .copy(_burstNorm)
+          .multiplyScalar(0.35 + Math.random() * 0.6)
+          .addScaledVector(_burstTanA, Math.cos(ang) * spread)
+          .addScaledVector(_burstTanB, Math.sin(ang) * spread)
+          .normalize();
+        const spd = (26 + Math.random() * 34) * scaleMul;
+        this.spawnElemParticle(
+          pos.x,
+          pos.y,
+          pos.z,
+          _burstDir.x * spd,
+          _burstDir.y * spd,
+          _burstDir.z * spd,
+          0xffe596,
+          0xd92600,
+          0.32 + Math.random() * 0.36,
+          (0.85 + Math.random() * 0.6) * scaleMul,
+          0.35,
+          16,
+          1.4,
+          1,
+          ang,
+          (Math.random() - 0.5) * 14,
+        );
+      }
+
+      const smokeCount = isDragonHit ? 4 : 3;
+      for (let i = 0; i < smokeCount; i++) {
+        this.spawnSmoke(
+          pos.x + (Math.random() - 0.5) * 2.2,
+          pos.y + (Math.random() - 0.5) * 2.0,
+          pos.z + (Math.random() - 0.5) * 2.2,
+          (Math.random() - 0.5) * 12,
+          4 + Math.random() * 8,
+          (Math.random() - 0.5) * 12,
+          0x261f1c,
+          1.3 + Math.random() * 0.7,
+          2.1 * scaleMul,
+          7.6 * scaleMul,
+          4.2,
+          0.9,
+          0.7,
+        );
+      }
+    } else if (element === 'ice') {
+      this.triggerVfxFlash(pos, 0x7dd3fc, 0.88 * intensity);
+      this.spawnShockwaveRing(
+        pos,
+        _burstNorm,
+        1.4 * intensity,
+        (isDragonHit ? 12.5 : 9.8) * intensity,
+        0xbaf2ff,
+        0.44,
+      );
+      this.spawnSparkBurst(pos, _burstNorm, Math.round(12 * intensity), 0xe0f7ff, 1.05);
+
+      // Shattering diamond ice shards
+      const shardCount = Math.round(18 * intensity);
+      for (let i = 0; i < shardCount; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spread = 0.4 + Math.random() * 1.15;
+        _burstDir
+          .copy(_burstNorm)
+          .multiplyScalar(0.4 + Math.random() * 0.7)
+          .addScaledVector(_burstTanA, Math.cos(ang) * spread)
+          .addScaledVector(_burstTanB, Math.sin(ang) * spread)
+          .normalize();
+        const spd = (20 + Math.random() * 30) * scaleMul;
+        this.spawnElemParticle(
+          pos.x + (Math.random() - 0.5) * 1.2,
+          pos.y + (Math.random() - 0.5) * 1.2,
+          pos.z + (Math.random() - 0.5) * 1.2,
+          _burstDir.x * spd,
+          _burstDir.y * spd,
+          _burstDir.z * spd,
+          0xffffff,
+          0x38bdf8,
+          0.42 + Math.random() * 0.32,
+          (1.25 + Math.random() * 0.9) * scaleMul,
+          (0.6 + Math.random() * 0.5) * scaleMul,
+          14,
+          1.7,
+          1,
+          ang,
+          (Math.random() - 0.5) * 12,
+        );
+      }
+
+      // Expanding cryo-frost mist & halo waves
+      const mistCount = Math.round(11 * intensity);
+      for (let i = 0; i < mistCount; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spread = 0.45 + Math.random() * 0.9;
+        _burstDir
+          .copy(_burstNorm)
+          .multiplyScalar(0.3)
+          .addScaledVector(_burstTanA, Math.cos(ang) * spread)
+          .addScaledVector(_burstTanB, Math.sin(ang) * spread)
+          .normalize();
+        const spd = (8 + Math.random() * 14) * scaleMul;
+        this.spawnElemParticle(
+          pos.x + (Math.random() - 0.5) * 1.8,
+          pos.y + (Math.random() - 0.5) * 1.8,
+          pos.z + (Math.random() - 0.5) * 1.8,
+          _burstDir.x * spd,
+          _burstDir.y * spd - 1.2,
+          _burstDir.z * spd,
+          0xe0f7ff,
+          0x1d4ed8,
+          0.5 + Math.random() * 0.38,
+          (1.5 + Math.random() * 0.8) * scaleMul,
+          (5.2 + Math.random() * 2.4) * scaleMul,
+          2.2,
+          3.1,
+          2,
+        );
+      }
+
+      for (let i = 0; i < 3; i++) {
+        this.spawnSmoke(
+          pos.x + (Math.random() - 0.5) * 2.0,
+          pos.y + (Math.random() - 0.5) * 2.0,
+          pos.z + (Math.random() - 0.5) * 2.0,
+          (Math.random() - 0.5) * 9,
+          1.5 + Math.random() * 4,
+          (Math.random() - 0.5) * 9,
+          0xc5e8ff,
+          1.15 + Math.random() * 0.5,
+          2.0 * scaleMul,
+          6.8 * scaleMul,
+          -0.6,
+          0,
+          0.65,
+        );
+      }
+    } else {
+      // Element === 'rock' : molten magma bursts, pulverized glowing stone shards, shock halos & debris
+      this.triggerVfxFlash(pos, 0xfbbf24, 1.05 * intensity);
+      this.spawnShockwaveRing(
+        pos,
+        _burstNorm,
+        1.8 * intensity,
+        (isDragonHit ? 15 : 12.5) * intensity,
+        0xf59e0b,
+        0.46,
+      );
+      this.spawnSparkBurst(pos, _burstNorm, Math.round(15 * intensity), 0xfbbf24, 1.25);
+
+      const coreCount = Math.round(12 * intensity);
+      for (let i = 0; i < coreCount; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spread = 0.4 + Math.random() * 0.9;
+        _burstDir
+          .copy(_burstNorm)
+          .multiplyScalar(0.5 + Math.random() * 0.6)
+          .addScaledVector(_burstTanA, Math.cos(ang) * spread)
+          .addScaledVector(_burstTanB, Math.sin(ang) * spread)
+          .normalize();
+        const spd = (12 + Math.random() * 20) * scaleMul;
+        this.spawnElemParticle(
+          pos.x + (Math.random() - 0.5) * 1.8,
+          pos.y + (Math.random() - 0.5) * 1.8,
+          pos.z + (Math.random() - 0.5) * 1.8,
+          _burstDir.x * spd,
+          _burstDir.y * spd + 2,
+          _burstDir.z * spd,
+          0xfef08a,
+          0xc2410c,
+          0.38 + Math.random() * 0.3,
+          (1.8 + Math.random() * 1.1) * scaleMul,
+          (5.0 + Math.random() * 2.5) * scaleMul,
+          8,
+          2.4,
+          0,
+        );
+      }
+
+      const rockShardCount = Math.round(18 * intensity);
+      for (let i = 0; i < rockShardCount; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spread = 0.45 + Math.random() * 1.2;
+        _burstDir
+          .copy(_burstNorm)
+          .multiplyScalar(0.4 + Math.random() * 0.7)
+          .addScaledVector(_burstTanA, Math.cos(ang) * spread)
+          .addScaledVector(_burstTanB, Math.sin(ang) * spread)
+          .normalize();
+        const spd = (24 + Math.random() * 32) * scaleMul;
+        this.spawnElemParticle(
+          pos.x,
+          pos.y,
+          pos.z,
+          _burstDir.x * spd,
+          _burstDir.y * spd + 4,
+          _burstDir.z * spd,
+          0xfbbf24,
+          0x574c41,
+          0.45 + Math.random() * 0.35,
+          (1.1 + Math.random() * 0.8) * scaleMul,
+          0.5,
+          26,
+          1.2,
+          1,
+          ang,
+          (Math.random() - 0.5) * 16,
+        );
+      }
+
+      const haloCount = Math.round(7 * intensity);
+      for (let i = 0; i < haloCount; i++) {
+        this.spawnElemParticle(
+          pos.x + (Math.random() - 0.5) * 2.0,
+          pos.y + (Math.random() - 0.5) * 1.5,
+          pos.z + (Math.random() - 0.5) * 2.0,
+          (Math.random() - 0.5) * 12,
+          2 + Math.random() * 6,
+          (Math.random() - 0.5) * 12,
+          0xd6b88d,
+          0x4a4035,
+          0.48 + Math.random() * 0.3,
+          2.0 * scaleMul,
+          7.5 * scaleMul,
+          4,
+          3.2,
+          2,
+        );
+      }
+
+      if (isDragonHit) {
+        this.spawnDebris(pos, 5, 'stone', 18, 0.58, _burstNorm);
+        this.spawnDebris(pos, 3, 'ember', 16, 0.55, _burstNorm);
+      }
+
+      for (let i = 0; i < 4; i++) {
+        this.spawnSmoke(
+          pos.x + (Math.random() - 0.5) * 2.4,
+          pos.y + (Math.random() - 0.5) * 2.0,
+          pos.z + (Math.random() - 0.5) * 2.4,
+          (Math.random() - 0.5) * 14,
+          3 + Math.random() * 7,
+          (Math.random() - 0.5) * 14,
+          0x574c41,
+          1.4 + Math.random() * 0.6,
+          2.4 * scaleMul,
+          8.4 * scaleMul,
+          2.6,
+          0.52,
+          0.7,
+        );
+      }
+    }
+  }
+
+  private updateElemParticles(dt: number, elapsed: number): void {
+    this.elemMat.uniforms.uTime.value = elapsed;
+
+    for (let i = 0; i < MAX_ELEM_PARTICLES; i++) {
+      const p = this.elemPool[i];
+      const i4 = i * 4;
+      const i3 = i * 3;
+      if (!p.active) {
+        this.elemPosScaleArr[i4 + 3] = 0;
+        continue;
+      }
+
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.active = false;
+        this.elemPosScaleArr[i4 + 3] = 0;
+        continue;
+      }
+
+      const lifeFrac = 1 - p.life / p.maxLife;
+      const damp = Math.exp(-p.drag * dt);
+      p.vx *= damp;
+      p.vz *= damp;
+      p.vy = p.vy * damp - p.gravity * dt;
+
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      p.angle += p.angVel * dt;
+
+      const ease = 1 - (1 - lifeFrac) * (1 - lifeFrac);
+      const scale = THREE.MathUtils.lerp(p.startScale, p.endScale, ease);
+
+      this.elemPosScaleArr[i4] = p.x;
+      this.elemPosScaleArr[i4 + 1] = p.y;
+      this.elemPosScaleArr[i4 + 2] = p.z;
+      this.elemPosScaleArr[i4 + 3] = scale;
+
+      this.elemCol0Arr[i3] = p.r0;
+      this.elemCol0Arr[i3 + 1] = p.g0;
+      this.elemCol0Arr[i3 + 2] = p.b0;
+
+      this.elemCol1Arr[i3] = p.r1;
+      this.elemCol1Arr[i3 + 1] = p.g1;
+      this.elemCol1Arr[i3 + 2] = p.b1;
+
+      this.elemParamsArr[i4] = p.angle;
+      this.elemParamsArr[i4 + 1] = lifeFrac;
+      this.elemParamsArr[i4 + 2] = p.kind;
+      this.elemParamsArr[i4 + 3] = i * 1.13;
+    }
+
+    this.elemPosScaleAttr.needsUpdate = true;
+    this.elemCol0Attr.needsUpdate = true;
+    this.elemCol1Attr.needsUpdate = true;
+    this.elemParamsAttr.needsUpdate = true;
+  }
+
+  private initWaterWakeSystem(): void {
+    this.waterWakePool = [];
+    for (let i = 0; i < MAX_WATER_WAKES; i++) {
+      this.waterWakePool.push({
+        active: false,
+        x: 0,
+        z: -9999,
+        vx: 0,
+        vz: 0,
+        life: 0,
+        maxLife: 1.5,
+        startScale: 3,
+        endScale: 16,
+        angle: 0,
+        angVel: 0,
+        kind: 0,
+        spin: 1,
+      });
+    }
+
+    const baseQuad = new THREE.PlaneGeometry(1, 1);
+    baseQuad.rotateX(-Math.PI / 2);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = baseQuad.index;
+    geo.attributes.position = baseQuad.attributes.position;
+    geo.attributes.uv = baseQuad.attributes.uv;
+    baseQuad.dispose();
+
+    this.waterWakePosScaleAttr = new THREE.InstancedBufferAttribute(this.waterWakePosScaleArr, 4);
+    this.waterWakePosScaleAttr.setUsage(THREE.DynamicDrawUsage);
+    this.waterWakeParamsAttr = new THREE.InstancedBufferAttribute(this.waterWakeParamsArr, 4);
+    this.waterWakeParamsAttr.setUsage(THREE.DynamicDrawUsage);
+
+    geo.setAttribute('aWakePosScale', this.waterWakePosScaleAttr);
+    geo.setAttribute('aWakeParams', this.waterWakeParamsAttr);
+    geo.instanceCount = MAX_WATER_WAKES;
+
+    this.waterWakeMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+      },
+      vertexShader: `
+        attribute vec4 aWakePosScale;
+        attribute vec4 aWakeParams;
+        varying vec2 vUv;
+        varying vec4 vParams;
+        varying float vViewDist;
+
+        void main() {
+          vUv = uv;
+          vParams = aWakeParams;
+
+          float scale = aWakePosScale.w;
+          if (scale <= 0.001) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            vViewDist = 9999.0;
+            return;
+          }
+
+          float ang = aWakeParams.x;
+          float c = cos(ang);
+          float s = sin(ang);
+          vec3 localPos = position * scale;
+          vec3 rotPos = vec3(
+            localPos.x * c - localPos.z * s,
+            localPos.y,
+            localPos.x * s + localPos.z * c
+          );
+          vec3 worldPos = vec3(aWakePosScale.x, aWakePosScale.y, aWakePosScale.z) + rotPos;
+          vec4 mvPos = viewMatrix * vec4(worldPos, 1.0);
+          vViewDist = -mvPos.z;
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        varying vec2 vUv;
+        varying vec4 vParams;
+        varying float vViewDist;
+
+        void main() {
+          float lifeFrac = clamp(vParams.y, 0.0, 1.0);
+          float kind = vParams.z;
+          float spin = vParams.w;
+          vec2 p = (vUv - 0.5) * 2.0;
+          float r = length(p);
+          if (r > 1.0) discard;
+
+          float theta = atan(p.y, p.x);
+          float alpha = 0.0;
+          vec3 col = vec3(0.74, 0.91, 0.98);
+
+          if (kind < 0.5) {
+            // Kind 0: Expanding concentric water wave crest ring
+            float crestA = exp(-pow(r - (0.76 - lifeFrac * 0.08), 2.0) * 65.0);
+            float crestB = exp(-pow(r - 0.50, 2.0) * 48.0) * 0.58;
+            float breakup = 0.72 + 0.28 * sin(theta * 8.0 + uTime * 3.0 * spin);
+            alpha = (crestA + crestB) * breakup;
+            col = mix(vec3(0.32, 0.72, 0.84), vec3(0.88, 0.96, 1.0), clamp(crestA * 1.15, 0.0, 1.0));
+          } else if (kind < 1.5) {
+            // Kind 1: Swirling 3-arm logarithmic water vortex (wingtip downwash eddy)
+            float spiralPhase = theta * 3.0 * spin - r * 9.5 - uTime * 5.2 * spin;
+            float arms = pow(max(0.0, 0.5 + 0.5 * cos(spiralPhase)), 1.7);
+            float ringFade = smoothstep(1.0, 0.28, r) * smoothstep(0.05, 0.24, r);
+            float centerCore = exp(-r * r * 14.0) * 0.55;
+            alpha = (arms * ringFade * 0.88 + centerCore);
+            col = mix(vec3(0.24, 0.66, 0.79), vec3(0.85, 0.95, 1.0), clamp(arms * ringFade + centerCore, 0.0, 1.0));
+          } else {
+            // Kind 2: Turbulent frothy wake trail foam patch
+            float stretch = exp(-(p.x * p.x * 3.6 + p.y * p.y * 1.15));
+            float froth = 0.55 + 0.45 * sin(p.y * 14.0 - uTime * 6.5) * cos(p.x * 16.0);
+            alpha = stretch * froth * 0.85;
+            col = mix(vec3(0.38, 0.76, 0.86), vec3(0.92, 0.98, 1.0), stretch);
+          }
+
+          float fadeIn = smoothstep(0.0, 0.10, lifeFrac);
+          float fadeOut = pow(max(0.0, 1.0 - lifeFrac), 1.35);
+          float distFade = exp(-vViewDist * 0.00045);
+          float finalAlpha = clamp(alpha * fadeIn * fadeOut * distFade * 0.82, 0.0, 0.88);
+          if (finalAlpha < 0.01) discard;
+
+          gl_FragColor = vec4(col, finalAlpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this.waterWakeGeo = geo;
+    this.waterWakeMesh = new THREE.Mesh(this.waterWakeGeo, this.waterWakeMat);
+    this.waterWakeMesh.frustumCulled = false;
+    this.waterWakeMesh.renderOrder = 3;
+    this.scene.add(this.waterWakeMesh);
+  }
+
+  private spawnWaterWake(
+    x: number,
+    z: number,
+    vx: number,
+    vz: number,
+    maxLife: number,
+    startScale: number,
+    endScale: number,
+    kind: 0 | 1 | 2,
+    spin: -1 | 1 = 1,
+    angle = Math.random() * Math.PI * 2,
+  ): void {
+    const w = this.waterWakePool[this.waterWakeCursor];
+    this.waterWakeCursor = (this.waterWakeCursor + 1) % MAX_WATER_WAKES;
+    w.active = true;
+    w.x = x;
+    w.z = z;
+    w.vx = vx;
+    w.vz = vz;
+    w.life = maxLife;
+    w.maxLife = maxLife;
+    w.startScale = startScale;
+    w.endScale = endScale;
+    w.kind = kind;
+    w.spin = spin;
+    w.angle = angle;
+    w.angVel = kind === 1 ? spin * (2.6 + Math.random() * 1.4) : spin * 0.35;
+  }
+
+  private updateWaterWakes(dt: number, elapsed: number): void {
+    this.waterWakeMat.uniforms.uTime.value = elapsed;
+
+    // Reset wake intensity smoothly if not actively flying over water
+    if (this.phase !== 'flying') {
+      this.oceanWakeIntensity = THREE.MathUtils.damp(this.oceanWakeIntensity, 0, 2.5, dt);
+    }
+
+    // Subtle wakes from low-skimming AI dragons over open sea
+    if (Math.random() < 0.35) {
+      for (const ai of this.aiDragons) {
+        if (!ai.alive || ai.pos.y > 14.0) continue;
+        if (getTerrainHeight(ai.pos.x, ai.pos.z) < -0.5) {
+          this.spawnWaterWake(
+            ai.pos.x,
+            ai.pos.z,
+            0,
+            0,
+            1.35,
+            3.5,
+            16.0,
+            Math.random() < 0.55 ? 0 : 1,
+            Math.random() < 0.5 ? 1 : -1,
+          );
+          break;
+        }
+      }
+    }
+
+    for (let i = 0; i < MAX_WATER_WAKES; i++) {
+      const w = this.waterWakePool[i];
+      const i4 = i * 4;
+      if (!w.active) {
+        this.waterWakePosScaleArr[i4 + 3] = 0;
+        continue;
+      }
+
+      w.life -= dt;
+      if (w.life <= 0) {
+        w.active = false;
+        this.waterWakePosScaleArr[i4 + 3] = 0;
+        continue;
+      }
+
+      const lifeFrac = 1 - w.life / w.maxLife;
+      const drag = Math.exp(-1.5 * dt);
+      w.vx *= drag;
+      w.vz *= drag;
+      w.x += w.vx * dt;
+      w.z += w.vz * dt;
+      w.angle += w.angVel * dt;
+
+      const easeOut = 1 - (1 - lifeFrac) * (1 - lifeFrac);
+      const scale = THREE.MathUtils.lerp(w.startScale, w.endScale, easeOut);
+      // Track ocean swell gently so wakes ride the surface waves cleanly
+      const swellY =
+        0.34 +
+        Math.sin(w.x * 0.02 + elapsed * 1.35) * Math.cos(w.z * 0.02 + elapsed * 1.1) * 0.48;
+
+      this.waterWakePosScaleArr[i4] = w.x;
+      this.waterWakePosScaleArr[i4 + 1] = swellY;
+      this.waterWakePosScaleArr[i4 + 2] = w.z;
+      this.waterWakePosScaleArr[i4 + 3] = scale;
+
+      this.waterWakeParamsArr[i4] = w.angle;
+      this.waterWakeParamsArr[i4 + 1] = lifeFrac;
+      this.waterWakeParamsArr[i4 + 2] = w.kind;
+      this.waterWakeParamsArr[i4 + 3] = w.spin;
+    }
+
+    this.waterWakePosScaleAttr.needsUpdate = true;
+    this.waterWakeParamsAttr.needsUpdate = true;
   }
 
   private computeZoneName(): string {
@@ -4838,11 +7070,19 @@ export class DragonEngine {
       pointerLocked: this.pointerLocked,
       weather: this.currentWeather,
       weatherMode: this.weatherMode,
-      stormIntensity: this.stormIntensity,
-      lightningActive: this.lightningPower > 0.15,
+      stormIntensity: Math.max(this.stormIntensity, this.volcanicZoneFactor * 0.85),
+      lightningActive: Math.max(this.lightningPower, this.volcanicLightningPower) > 0.14,
       cameraView: this.cameraView,
       isLooping: this.halfLoopRemaining > 0.05,
       knifeEdgeSide: this.knifeEdgeSide,
+      maneuverKind: this.phase === 'flying' && !this.playerCrashing ? this.maneuverKind : 'none',
+      maneuverSide: this.phase === 'flying' && !this.playerCrashing ? this.maneuverSide : 0,
+      maneuverIntensity:
+        this.phase === 'flying' && !this.playerCrashing ? this.maneuverIntensity : 0,
+      bankAngleDeg:
+        this.phase === 'flying' ? Math.round(THREE.MathUtils.radToDeg(this.playerRoll)) : 0,
+      motionBlurIntensity: Number(this.motionBlurIntensity.toFixed(3)),
+      isBoosting: this.boostVisualFactor > 0.18,
       nearLandedDragon:
         this.phase === 'on_foot' &&
         this.riderPos.distanceTo(this.landedDragonPos) < 16,
@@ -4864,6 +7104,7 @@ export class DragonEngine {
       activeLoreTaleId: this.activeLoreTaleId,
       activeLoreSegment: this.activeLoreSegment,
       isLorePlaying: this.isLorePlaying,
+      knightSpeechText: this.knightSpeechText,
     });
   }
 
@@ -4973,21 +7214,22 @@ export class DragonEngine {
         d.mesh.rotation.y += d.rotVel.y * dt;
         d.mesh.rotation.z += d.rotVel.z * dt;
 
-        // Burning embers & charred planks leave dynamic spark/smoke wisps in mid-air
-        if (d.burning && Math.random() < 0.28) {
-          this.spawnParticle(
+        // Burning embers & charred planks leave realistic curling smoke wisps in mid-air
+        if (d.burning && Math.random() < 0.34) {
+          this.spawnSmoke(
             d.mesh.position.x,
             d.mesh.position.y,
             d.mesh.position.z,
-            (Math.random() - 0.5) * 2,
-            2 + Math.random() * 3,
-            (Math.random() - 0.5) * 2,
-            d.kind === 'ember' ? 0xff7b1a : 0x334155,
-            0.48,
-            0.9,
+            (Math.random() - 0.5) * 2.5,
+            3 + Math.random() * 4,
+            (Math.random() - 0.5) * 2.5,
+            d.kind === 'ember' ? 0x261c18 : 0x2f343c,
+            1.25,
+            1.6,
+            6.2,
             2.4,
-            -1.5,
-            d.kind === 'ember',
+            d.kind === 'ember' ? 0.72 : 0.25,
+            0.7,
           );
         }
 
@@ -5106,7 +7348,7 @@ export class DragonEngine {
 
     if (element === 'fire') {
       b.scorchAmount = Math.min(1, b.scorchAmount + 0.18);
-      if (Math.random() < 0.7) {
+      if (Math.random() < 0.75) {
         this.spawnParticle(
           b.pos.x + (Math.random() - 0.5) * 10,
           b.pos.y + Math.random() * 8,
@@ -5114,12 +7356,27 @@ export class DragonEngine {
           (Math.random() - 0.5) * 6,
           6 + Math.random() * 9,
           (Math.random() - 0.5) * 6,
-          Math.random() < 0.6 ? 0xff6b00 : 0x334155,
-          0.8,
-          2.2,
-          6.8,
+          0xff6b00,
+          0.65,
+          2.0,
+          5.6,
           -2,
           true,
+        );
+        this.spawnSmoke(
+          b.pos.x + (Math.random() - 0.5) * 10,
+          b.pos.y + Math.random() * 8,
+          b.pos.z + (Math.random() - 0.5) * 10,
+          (Math.random() - 0.5) * 5,
+          6 + Math.random() * 6,
+          (Math.random() - 0.5) * 5,
+          0x231e1b,
+          2.6,
+          4.2,
+          15.5,
+          3.4,
+          0.8,
+          0.9,
         );
       }
     }
@@ -5184,20 +7441,37 @@ export class DragonEngine {
       this.world.hideSoldiersForBuilding(b.id);
       this.spawnDebris(b.pos, 24, kind, 30, 1.45, impactVel);
       this.spawnDebris(b.pos, 7, 'ember', 24, 0.9, impactVel);
-      for (let k = 0; k < 20; k++) {
-        this.spawnParticle(
-          b.pos.x + (Math.random() - 0.5) * 10,
+      for (let k = 0; k < 18; k++) {
+        if (k < 8) {
+          this.spawnParticle(
+            b.pos.x + (Math.random() - 0.5) * 10,
+            b.pos.y + Math.random() * 8,
+            b.pos.z + (Math.random() - 0.5) * 10,
+            (Math.random() - 0.5) * 24,
+            6 + Math.random() * 14,
+            (Math.random() - 0.5) * 24,
+            0xff7b1a,
+            0.9,
+            2.8,
+            8.2,
+            4,
+            true,
+          );
+        }
+        this.spawnSmoke(
+          b.pos.x + (Math.random() - 0.5) * 12,
           b.pos.y + Math.random() * 8,
-          b.pos.z + (Math.random() - 0.5) * 10,
-          (Math.random() - 0.5) * 24,
-          6 + Math.random() * 16,
-          (Math.random() - 0.5) * 24,
-          k < 10 ? 0xff7b1a : 0x78716c,
-          1.15,
+          b.pos.z + (Math.random() - 0.5) * 12,
+          (Math.random() - 0.5) * 20,
+          4 + Math.random() * 12,
+          (Math.random() - 0.5) * 20,
+          k < 8 ? 0x302925 : 0x6c645d,
+          3.4,
+          6.0,
+          24.0,
           3.2,
-          10.5,
-          4,
-          k < 10,
+          k < 8 ? 0.65 : 0.15,
+          0.9,
         );
       }
       if (b.pos.distanceTo(this.playerPos) < 380) {
@@ -5273,19 +7547,36 @@ export class DragonEngine {
     this.spawnDebris(sp, 18, ship.burnLevel > 0.2 ? 'char_wood' : 'wood', 26, 1.2);
     this.spawnDebris(sp, 8, 'ember', 24, 0.9);
     for (let k = 0; k < 22; k++) {
-      this.spawnParticle(
+      if (k < 11) {
+        this.spawnParticle(
+          sp.x + (Math.random() - 0.5) * 12,
+          4 + Math.random() * 8,
+          sp.z + (Math.random() - 0.5) * 12,
+          (Math.random() - 0.5) * 24,
+          8 + Math.random() * 16,
+          (Math.random() - 0.5) * 24,
+          0xff6b00,
+          0.95,
+          2.6,
+          8.8,
+          5,
+          true,
+        );
+      }
+      this.spawnSmoke(
         sp.x + (Math.random() - 0.5) * 12,
         4 + Math.random() * 8,
         sp.z + (Math.random() - 0.5) * 12,
-        (Math.random() - 0.5) * 24,
-        8 + Math.random() * 16,
-        (Math.random() - 0.5) * 24,
-        k < 13 ? 0xff6b00 : 0x334155,
-        1.1,
-        2.8,
-        10.5,
-        5,
-        k < 13,
+        (Math.random() - 0.5) * 18,
+        5 + Math.random() * 12,
+        (Math.random() - 0.5) * 18,
+        k < 12 ? 0x1c1917 : 0x3b3532,
+        3.6,
+        5.5,
+        24.0,
+        3.8,
+        0.9,
+        0.95,
       );
     }
     this.spawnSparkBurst(sp.clone().setY(6), _unitY, 28, 0xff9b38, 1.4);
@@ -5709,8 +8000,20 @@ export class DragonEngine {
     this.leafDebrisMat.dispose();
     this.iceDebrisMat.dispose();
     this.particleTex.dispose();
+    this.scene.remove(this.smokeMesh);
+    this.smokeGeo.dispose();
+    this.smokeMat.dispose();
+    this.smokeTex.dispose();
+    this.scene.remove(this.elemMesh);
+    this.elemGeo.dispose();
+    this.elemMat.dispose();
+    this.scene.remove(this.waterWakeMesh);
+    this.waterWakeGeo.dispose();
+    this.waterWakeMat.dispose();
     this.rainLines.geometry.dispose();
     this.rainMat.dispose();
+    this.speedStreakLines.geometry.dispose();
+    this.speedStreakMat.dispose();
     this.lightningBolt.geometry.dispose();
     this.lightningMat.dispose();
     this.world.dispose();
