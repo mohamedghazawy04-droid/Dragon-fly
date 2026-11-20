@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    font-family: "Tajawal", system-ui, sans-serif;
+    background-color: #070a10;
+    color: #f1f5f9;
+  }
+}
+
+.font-display {
+  font-family: "Amiri", serif;
+}
+
+.font-mono-nums {
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-surface {
+  background-color: rgba(10, 14, 22, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.hud-surface-strong {
+  background-color: rgba(8, 12, 19, 0.93);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}

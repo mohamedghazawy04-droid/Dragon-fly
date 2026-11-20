@@ -1,0 +1,194 @@
+import React from 'react';
+import {
+  Compass,
+  Flame,
+  HeartHandshake,
+  Maximize2,
+  Minimize2,
+  Mountain,
+  Shield,
+  Snowflake,
+  Wind,
+} from 'lucide-react';
+import { DRAGON_SPECS, DragonId, GameMode, HudState } from '../game/types';
+
+interface SanctuaryBondOverlayProps {
+  hud: HudState;
+  isFullscreen: boolean;
+  onToggleFullscreen: () => void;
+  onSelectDragon: (id: DragonId) => void;
+  onBondStep: () => void;
+  onSelectMode: (mode: GameMode) => void;
+  onLaunch: () => void;
+}
+
+export const SanctuaryBondOverlay: React.FC<SanctuaryBondOverlayProps> = ({
+  hud,
+  isFullscreen,
+  onToggleFullscreen,
+  onSelectDragon,
+  onBondStep,
+  onSelectMode,
+  onLaunch,
+}) => {
+  const currentSpec = DRAGON_SPECS[hud.dragonId];
+  const isBonded = hud.bondLevel >= 100;
+
+  return (
+    <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between p-3 md:p-4">
+      {/* Top Title Header */}
+      <header className="pointer-events-auto mx-auto flex w-full max-w-5xl items-center justify-between gap-4 rounded-xl px-4 py-2 bg-slate-950/60 backdrop-blur-md border border-white/10">
+        <div className="flex items-center gap-3">
+          <h1 className="font-display text-xl md:text-2xl font-bold tracking-wide text-amber-300 whitespace-nowrap">
+            أجنحة السماء: فرسان التنانين
+          </h1>
+          <span className="hidden sm:inline text-[11px] text-slate-300">
+            كهف ملاذ الصخور
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Mode Switcher */}
+          <div className="flex items-center gap-1 rounded-lg bg-black/45 p-1 border border-white/10">
+            <button
+              type="button"
+              onClick={() => onSelectMode('combat')}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                hud.mode === 'combat'
+                  ? 'bg-amber-500 text-slate-950 font-bold'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>حرب السماء</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectMode('free')}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                hud.mode === 'free'
+                  ? 'bg-sky-400 text-slate-950 font-bold'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Compass className="w-3.5 h-3.5" />
+              <span>تحليق حر</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={onToggleFullscreen}
+            title={isFullscreen ? 'إنهاء ملء الشاشة' : 'ملء الشاشة الأفقي'}
+            className="flex items-center gap-1.5 rounded-lg bg-black/50 hover:bg-black/75 px-2.5 py-1.5 text-xs font-medium text-slate-200 border border-white/15 cursor-pointer"
+          >
+            {isFullscreen ? (
+              <Minimize2 className="w-3.5 h-3.5 text-amber-300" />
+            ) : (
+              <Maximize2 className="w-3.5 h-3.5 text-amber-300" />
+            )}
+            <span className="hidden md:inline">
+              {isFullscreen ? 'تصغير' : 'ملء الشاشة'}
+            </span>
+          </button>
+        </div>
+      </header>
+
+      {/* Center remains unobstructed so the 3D Dragon inside the Rock Cavern shines */}
+
+      {/* Bottom Bonding & Selection Dock */}
+      <section className="pointer-events-auto mx-auto w-full max-w-5xl rounded-2xl p-3 md:p-4 bg-slate-950/65 backdrop-blur-md border border-white/10">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+          {/* Dragon Selection Cards (3 dragons) */}
+          <div className="lg:col-span-7 grid grid-cols-3 gap-2.5">
+            {(['ignis', 'glacius', 'terra'] as DragonId[]).map((id) => {
+              const spec = DRAGON_SPECS[id];
+              const active = hud.dragonId === id;
+              const Icon =
+                id === 'ignis' ? Flame : id === 'glacius' ? Snowflake : Mountain;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => onSelectDragon(id)}
+                  className={`text-right rounded-xl p-3 transition-all cursor-pointer border ${
+                    active
+                      ? 'bg-white/10 border-amber-400/70'
+                      : 'bg-black/30 border-white/10 hover:border-white/25'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="font-display text-lg font-bold text-white whitespace-nowrap">
+                      {spec.nameAr}
+                    </span>
+                    <Icon
+                      className="w-4 h-4 shrink-0"
+                      style={{ color: spec.accentHex }}
+                    />
+                  </div>
+                  <div className="text-xs text-slate-300 truncate">{spec.titleAr}</div>
+                  <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-400">
+                    <span>{spec.elementAr}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono-nums">{spec.maxHp} صحة</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Bonding Ritual + Launch Action */}
+          <div className="lg:col-span-5 flex flex-col gap-3 border-t lg:border-t-0 lg:border-r border-white/10 pt-3 lg:pt-0 lg:pr-4">
+            <div>
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="text-slate-200 font-medium">
+                  مستوى التآلف مع {currentSpec.nameAr}
+                </span>
+                <span className="font-mono-nums font-bold text-amber-300">
+                  {hud.bondLevel}%
+                </span>
+              </div>
+              <div className="h-2.5 w-full rounded-full bg-black/50 overflow-hidden border border-white/10">
+                <div
+                  className="h-full transition-all duration-200"
+                  style={{
+                    width: `${hud.bondLevel}%`,
+                    backgroundColor: isBonded ? '#34d399' : currentSpec.accentHex,
+                  }}
+                />
+              </div>
+              <p className="mt-1.5 text-xs text-slate-300 leading-relaxed">
+                {currentSpec.descriptionAr}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={onBondStep}
+                disabled={isBonded}
+                className={`flex-1 flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  isBonded
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 cursor-default'
+                    : 'bg-white/10 hover:bg-white/20 text-white border border-white/20'
+                }`}
+              >
+                <HeartHandshake className="w-4 h-4" />
+                <span>{isBonded ? 'اكتمل التآلف' : 'تآلف مع التنين'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={onLaunch}
+                className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 px-5 py-2.5 text-sm font-extrabold transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Wind className="w-4 h-4" />
+                <span>امْتَطِ التنين وحلّق</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+};
