@@ -28,12 +28,16 @@ import {
   DragonUpgradeKey,
   ElementType,
   EnemyIndicator,
+  FlightTip,
   GameMode,
   GamePhase,
   HudState,
   KnightUpgradeKey,
+  LandmarkInfo,
   ManeuverKind,
+  MinimapBlip,
   ProgressionState,
+  ThreatLevel,
   UPGRADE_MAX_LEVEL,
   WarStatus,
   WarTargetType,
@@ -43,9 +47,12 @@ import {
 } from './types';
 import {
   buildDragonWorld,
+  CLOUD_WRAP_HALF,
+  CLOUD_WRAP_SPAN,
   DestructibleBuilding,
   DestructibleTree,
   getTerrainHeight,
+  MAX_CLOUD_SHADOWS,
   PirateShipActor,
   WorldBuildResult,
 } from './worldBuilder';
@@ -63,6 +70,16 @@ const _camLookAt = new THREE.Vector3();
 const _projVec = new THREE.Vector3();
 const _rayToEnemy = new THREE.Vector3();
 const _closestPt = new THREE.Vector3();
+const _windDir = new THREE.Vector3();
+const _windSeg = new THREE.Vector3();
+const _windBestPt = new THREE.Vector3();
+const _cineCamPos = new THREE.Vector3();
+const _cineLookAt = new THREE.Vector3();
+const _cineToLm = new THREE.Vector3();
+const _cineSide = new THREE.Vector3();
+const _normCamPos = new THREE.Vector3();
+const _normLookAt = new THREE.Vector3();
+const _normCamUp = new THREE.Vector3();
 const _unitX = new THREE.Vector3(1, 0, 0);
 const _unitY = new THREE.Vector3(0, 1, 0);
 const _unitZ = new THREE.Vector3(0, 0, 1);
@@ -416,6 +433,7 @@ export class DragonEngine {
   private playerSpeed = 58;
   private wingPhase = 0;
   private lastWingSign = 1;
+  private currentTurnIntensity = 0;
   private jawOpenAmount = 0;
   private roarTimer = 0;
   private healBurstTimer = 0;
@@ -474,7 +492,22 @@ export class DragonEngine {
   private energy = 100;
   private maxEnergy = 100;
   private bondLevel = 35;
+  private spiritualBond = 25;
+  private fusionActive = false;
+  private fusionTimeLeft = 0;
+  private fusionDuration = 14;
+  private halfLoopBondPending = false;
+  private knifeEdgeBondTimer = 0;
+  private knifeEdgeChimeCooldown = 0;
+  private sharpTurnBondTimer = 0;
+  private sharpTurnBondCooldown = 0;
+  private wasDivingDeep = false;
+  private divePullupCooldown = 0;
+  private fusionParticleTimer = 0;
+  private bondReadyAnnounced = false;
   private woundsCount = 0;
+  private playerScarSeverity = 0;
+  private woundEmberTimer = 0;
   private allyScore = 0;
   private enemyScore = 0;
 
@@ -544,6 +577,24 @@ export class DragonEngine {
   private speedStreakMat!: THREE.LineBasicMaterial;
   private speedStreakSeeds!: Float32Array;
   private readonly speedStreakCount = 72;
+  private windCurrentIntensity = 0;
+  private windCurrentBoostTimer = 0;
+  private windWingTrailTimer = 0;
+  private wasInWindCurrent = false;
+  private autoCinematicEnabled = true;
+  private cinematicActive = false;
+  private cinematicTimer = 0;
+  private readonly cinematicDuration = 5.4;
+  private cinematicLandmark: LandmarkInfo | null = null;
+  private cinematicBlend = 0;
+  private cinematicShotStyle: 0 | 1 | 2 = 0;
+  private landmarkShotCooldowns = new Map<string, number>();
+  private activeFlightTip: FlightTip | null = null;
+  private flightTipTimer = 0;
+  private flightTipMinGapTimer = 0;
+  private flightTipCooldowns = new Map<string, number>();
+  private discoveredLandmarks = new Set<string>(['sanctuary']);
+  private waterSkimTipTimer = 0;
 
   // Single-draw-call Instanced Volumetric Smoke System
   private smokePool: SmokePuff[] = [];
@@ -618,6 +669,11 @@ export class DragonEngine {
   private nextVolcanicLightningTimer = 1.4;
   private lightningOrigin = new THREE.Vector3(120, 220, -180);
   private lastReflectionStormBand = 0;
+  private lastSunReflectionBucket = 0;
+  private sunDir = new THREE.Vector3(0.62, 0.32, -0.72).normalize();
+  private cloudWindOffset = new THREE.Vector2(0, 0);
+  private shadowBestScores = new Float32Array(MAX_CLOUD_SHADOWS);
+  private shadowBestIndices = new Int32Array(MAX_CLOUD_SHADOWS);
 
   private rainLines!: THREE.LineSegments;
   private rainMat!: THREE.LineBasicMaterial;
@@ -727,12 +783,12 @@ export class DragonEngine {
 
     this.maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
 
-    // 3. Scene, Camera, Fog, Studio Environment (UE5 filmic contrast balance)
+    // 3. Scene, Camera, Fog, Studio Environment (UE5 filmic contrast balance for 10.4km world)
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xc99c6e);
-    this.scene.fog = new THREE.FogExp2(0xc99c6e, 0.00021);
+    this.scene.fog = new THREE.FogExp2(0xc99c6e, 0.000125);
 
-    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.4, 9400);
+    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.4, 18500);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     const skyEnvScene = new THREE.Scene();
@@ -987,10 +1043,12 @@ export class DragonEngine {
       { id: 'ally_1', nameAr: 'حارس الفجر', team: 'ally', specId: 'glacius', x: -340, y: 105, z: 180 },
       { id: 'ally_2', nameAr: 'جناح العاصفة', team: 'ally', specId: 'terra', x: 240, y: 112, z: -280 },
       { id: 'ally_3', nameAr: 'فارس الشفق', team: 'ally', specId: 'ignis', x: -160, y: 98, z: -460 },
+      { id: 'ally_4', nameAr: 'نسر الأفق', team: 'ally', specId: 'glacius', x: 1450, y: 145, z: -1020 },
       { id: 'enemy_1', nameAr: 'تنين الرماد', team: 'enemy', specId: 'ignis', x: -660, y: 118, z: -120 },
       { id: 'enemy_2', nameAr: 'مخلب الصقيع', team: 'enemy', specId: 'glacius', x: -240, y: 120, z: -180 },
       { id: 'enemy_3', nameAr: 'وحش البازلت', team: 'enemy', specId: 'terra', x: 640, y: 112, z: -380 },
       { id: 'enemy_4', nameAr: 'ظل القراصنة', team: 'enemy', specId: 'ignis', x: 260, y: 94, z: 240 },
+      { id: 'enemy_5', nameAr: 'صاعقة العاصفة', team: 'enemy', specId: 'ignis', x: -1950, y: 150, z: 480 },
     ];
 
     const roostLen = Math.max(1, this.world.hangingRoostSpots.length);
@@ -1092,8 +1150,10 @@ export class DragonEngine {
       if (e.code === 'KeyR') this.returnToSanctuary();
       if (e.code === 'KeyT') this.triggerRoar();
       if (e.code === 'KeyV') this.toggleCameraView();
+      if (e.code === 'KeyO') this.toggleAutoCinematic();
       if (e.code === 'KeyX') this.triggerHalfLoop();
       if (e.code === 'KeyK') this.toggleKnifeEdge();
+      if (e.code === 'KeyZ') this.activateFusion();
       if (e.code === 'KeyG') this.landDragon();
       if (e.code === 'KeyU') this.jumpOffDragon();
       if (e.code === 'KeyJ') this.isFiring = true;
@@ -1516,10 +1576,218 @@ export class DragonEngine {
     this.emitHud();
   }
 
+  public toggleAutoCinematic(): void {
+    this.audio.init();
+    this.autoCinematicEnabled = !this.autoCinematicEnabled;
+    if (!this.autoCinematicEnabled) {
+      this.cinematicActive = false;
+      this.showToast('تم إيقاف اللقطات السينمائية التلقائية');
+    } else {
+      this.showToast('تم تفعيل اللقطات السينمائية التلقائية');
+    }
+    this.emitHud();
+  }
+
+  public dismissFlightTip(): void {
+    this.activeFlightTip = null;
+    this.flightTipTimer = 0;
+    this.emitHud();
+  }
+
+  private presentFlightTip(tip: FlightTip, forcePriority = false): void {
+    if (this.phase !== 'flying' || this.playerCrashing) return;
+    if (!forcePriority) {
+      if (this.flightTipCooldowns.has(tip.id)) return;
+      if (this.activeFlightTip && this.flightTipMinGapTimer > 0) return;
+    }
+    this.activeFlightTip = tip;
+    this.flightTipTimer = tip.category === 'landmark' ? 8.5 : 7.2;
+    this.flightTipMinGapTimer = 3.2;
+    this.flightTipCooldowns.set(tip.id, tip.category === 'landmark' ? 60 : 22);
+    this.emitHud();
+  }
+
+  private getLandmarkDiscoveryTip(lm: LandmarkInfo): FlightTip {
+    const landmarkAdvice: Record<string, { tag: string; body: string }> = {
+      roost: {
+        tag: 'K للميلان · G للهبوط',
+        body: 'استخدم الميلان الجانبي 90° (K) للمراوغة بين الأشجار الشاهقة، واضغط G للهبوط واستكشاف القمم.',
+      },
+      chasm: {
+        tag: 'K للميلان · ضيق الأجنحة',
+        body: 'فعّل الميلان الجانبي (K) لتقليص عرض جناحيك والعبور بسرعة فائقة داخل الممر الصخري الضيق دون اصطدام.',
+      },
+      castle: {
+        tag: 'نار/صخر · قتال قريب U/F',
+        body: 'حلّق بمحاذاة الأسوار لتدمير الحصون بنفث العنصر، أو اقفز بـ U واستخدم السيف بـ F للاشتباك.',
+      },
+      palace: {
+        tag: 'تيارات هوائية · O للسينمائي',
+        body: 'استثمر التيارات الهوائية حول القباب لتسريع الانقضاض وشحن الرابطة الروحية، وبدّل الكاميرا بحرف V.',
+      },
+      beach: {
+        tag: 'ملامسة البحر · موجات ودوامات',
+        body: 'اقترب من صفحة المياه بهدوء لملامسة البحر؛ تتكوّن دوامات مائية ديناميكية وتشحن الرابطة الروحية.',
+      },
+      volcano: {
+        tag: 'C للانقضاض · X للالتفاف',
+        body: 'انقضّ نحو الفوهة بزاوية حادة لاكتساب سرعة قصوى ثم نفّذ التفافاً نصف دائري (X) للارتداد للأعلى.',
+      },
+      frostspire: {
+        tag: 'Shift تعزيز + انعطاف حاد',
+        body: 'ادمج التعزيز (Shift) مع الانعطافات الحادة لزيادة وتيرة خفق الأجنحة والمناورة بين الأبراج الجليدية.',
+      },
+      pirates: {
+        tag: 'انقضاض عمودي + نفث عنصري',
+        body: 'انقضّ من ارتفاع عالٍ (C) نحو سفن القراصنة وأطلق وابل النار أو الصخر قبل الانسحاب السريع للأعلى.',
+      },
+      volcanic_archipelago: {
+        tag: 'منطقة نائية · Z للاندماج',
+        body: 'راقب الخريطة المصغرة لتحديد التهديدات القريبة، واستخدم قدرة الاندماج (Z) فور اكتمال الرابطة الروحية.',
+      },
+      enchanted_forest: {
+        tag: 'تيارات سماوية · تعزيز مجاني',
+        body: 'حلّق داخل التيارات الهوائية فوق الأشجار البلورية لاكتساب دفعة سرعة إضافية دون استنزاف الطاقة.',
+      },
+      eastern_sky_spires: {
+        tag: 'قمم شاهقة · تيارات صاعدة',
+        body: 'تسلّق التيارات الحرارية بين الأبراج الصخرية الشرقية للوصول إلى أعلى طبقات السحب ومراقبة ظلالها فوق المحيط.',
+      },
+      southern_coral_atoll: {
+        tag: 'بحيرة مرجانية · ملامسة المياه',
+        body: 'اخفض ارتفاعك فوق البحيرة الفيروزية الدافئة واستمتع بانعكاسات الشمس وظلال السحب المتحركة على الأمواج.',
+      },
+      northern_glacier_crown: {
+        tag: 'قمم جليدية · سرعة قصوى',
+        body: 'استثمر الرياح القطبية السريعة للتحليق فوق الجبال الثلجية الشاهقة وتنفيذ انقضاضات جليدية خاطفة.',
+      },
+      western_storm_isles: {
+        tag: 'مضيق بازلتي · K للميلان',
+        body: 'شق طريقك وسط البوابات الصخرية الغربية باستخدام الميلان الجانبي (K) لتفادي الجروف وسط العواصف.',
+      },
+    };
+    const info = landmarkAdvice[lm.id] ?? {
+      tag: 'طيران متقدم · X / K / Shift',
+      body: 'استخدم الالتفاف (X) والميلان الجانبي (K) والتعزيز (Shift) لاستكشاف المعلم وشحن الرابطة الروحية.',
+    };
+    return {
+      id: `lm_tip_${lm.id}`,
+      category: 'landmark',
+      titleAr: `اكتشاف معلم: ${lm.nameAr}`,
+      mechanicTagAr: info.tag,
+      bodyAr: info.body,
+    };
+  }
+
+  private addSpiritualBond(amount: number, emitFeedback = false): void {
+    if (this.fusionActive || amount <= 0 || this.phase !== 'flying' || this.playerCrashing) return;
+    const prev = this.spiritualBond;
+    this.spiritualBond = Math.min(100, prev + amount);
+
+    if (prev < 100 && this.spiritualBond >= 100 && !this.bondReadyAnnounced) {
+      this.bondReadyAnnounced = true;
+      this.audio.playBondChime(1.0);
+      this.showToast('اكتملت الرابطة الروحية — اضغط Z لتفعيل الاندماج!');
+      for (let i = 0; i < 18; i++) {
+        this.spawnElemParticle(
+          this.playerPos.x + (Math.random() - 0.5) * 6,
+          this.playerPos.y + (Math.random() - 0.5) * 4,
+          this.playerPos.z + (Math.random() - 0.5) * 6,
+          (Math.random() - 0.5) * 18,
+          6 + Math.random() * 14,
+          (Math.random() - 0.5) * 18,
+          0xfef08a,
+          0xffb84d,
+          0.65,
+          1.4,
+          4.2,
+          0,
+          1.2,
+          1,
+        );
+      }
+    } else if (emitFeedback) {
+      this.audio.playBondChime(0.35 + (this.spiritualBond / 100) * 0.55);
+      for (let i = 0; i < 8; i++) {
+        this.spawnElemParticle(
+          this.playerPos.x + (Math.random() - 0.5) * 4,
+          this.playerPos.y + 1 + (Math.random() - 0.5) * 2.5,
+          this.playerPos.z + (Math.random() - 0.5) * 4,
+          (Math.random() - 0.5) * 11,
+          3 + Math.random() * 7,
+          (Math.random() - 0.5) * 11,
+          0x7dd3fc,
+          0xfbbf24,
+          0.45,
+          1.0,
+          3.2,
+          0,
+          1.0,
+          0,
+        );
+      }
+    }
+  }
+
+  public activateFusion(): void {
+    if (
+      this.phase !== 'flying' ||
+      this.playerCrashing ||
+      this.fusionActive ||
+      this.spiritualBond < 100
+    ) {
+      return;
+    }
+    this.audio.init();
+    this.fusionDuration = 14 + this.progression.knightUpgrades.spirit * 1.5;
+    this.fusionTimeLeft = this.fusionDuration;
+    this.fusionActive = true;
+    this.bondReadyAnnounced = false;
+    this.energy = this.maxEnergy;
+    this.hp = Math.min(this.maxHp, this.hp + 24);
+    this.roarTimer = Math.max(this.roarTimer, 0.9);
+    this.impactShake = Math.max(this.impactShake, 0.58);
+
+    const fusionHex =
+      this.activeElement === 'ice'
+        ? 0x7dd3fc
+        : this.activeElement === 'rock'
+          ? 0xfacc15
+          : 0xffb347;
+    this.playerRig.setFusionGlow(1.15, fusionHex);
+    this.spawnShockwaveRing(this.playerPos, _unitY, 1.5, 22, fusionHex, 0.65);
+    this.triggerVfxFlash(this.playerPos, fusionHex, 1.4);
+    for (let i = 0; i < 28; i++) {
+      this.spawnElemParticle(
+        this.playerPos.x + (Math.random() - 0.5) * 6,
+        this.playerPos.y + (Math.random() - 0.5) * 5,
+        this.playerPos.z + (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 32,
+        (Math.random() - 0.3) * 24,
+        (Math.random() - 0.5) * 32,
+        0xffffff,
+        fusionHex,
+        0.72,
+        1.5,
+        4.6,
+        0,
+        1.3,
+        i % 2 === 0 ? 0 : 1,
+      );
+    }
+
+    this.audio.playFusionActivate(this.activeElement);
+    this.audio.playRoar(this.activeElement, 1.15, 1.12);
+    this.audio.speakKnight('fusion', true);
+    this.showToast('تفعيل الاندماج الروحي!');
+    this.emitHud();
+  }
+
   public triggerHalfLoop(): void {
     if (this.phase !== 'flying' || this.halfLoopRemaining > 0.05) return;
     this.audio.init();
     this.halfLoopRemaining = Math.PI;
+    this.halfLoopBondPending = true;
     this.maneuverKind = 'half_loop';
     this.maneuverSide = 0;
     this.maneuverIntensity = 1;
@@ -1534,6 +1802,7 @@ export class DragonEngine {
     this.audio.init();
     if (this.knifeEdgeSide !== 0) {
       this.knifeEdgeSide = 0;
+      this.knifeEdgeBondTimer = 0;
       this.maneuverFlashTimer = 0.16;
     } else {
       const turnLeft =
@@ -1547,10 +1816,22 @@ export class DragonEngine {
       } else {
         this.knifeEdgeSide = this.playerRoll >= 0 ? 1 : -1;
       }
+      this.knifeEdgeBondTimer = 0;
       this.maneuverKind = 'knife_edge';
       this.maneuverSide = this.knifeEdgeSide > 0 ? -1 : 1;
       this.maneuverIntensity = 0.92;
       this.maneuverFlashTimer = 0.45;
+      if (this.knifeEdgeChimeCooldown <= 0) {
+        this.addSpiritualBond(8, false);
+        this.knifeEdgeChimeCooldown = 3.0;
+      }
+      this.presentFlightTip({
+        id: 'maneuver_knife_edge',
+        category: 'maneuver',
+        titleAr: 'مناورة الميلان الجانبي 90° (Knife-Edge)',
+        mechanicTagAr: 'K · عبور الممرات + شحن الرابطة',
+        bodyAr: 'تقلّص عرض الأجنحة لاختراق الشقوق الجبلية الضيقة، وتشحن الرابطة الروحية باستمرار لتفعيل الاندماج (Z).',
+      });
     }
     this.audio.playWingbeat();
     this.emitHud();
@@ -1702,6 +1983,20 @@ export class DragonEngine {
     this.maneuverSide = 0;
     this.maneuverIntensity = 0;
     this.maneuverFlashTimer = 0;
+    this.spiritualBond = 25;
+    this.fusionActive = false;
+    this.fusionTimeLeft = 0;
+    this.halfLoopBondPending = false;
+    this.bondReadyAnnounced = false;
+    this.playerRig.setFusionGlow(0);
+    this.windCurrentIntensity = 0;
+    this.windCurrentBoostTimer = 0;
+    this.wasInWindCurrent = false;
+    this.cinematicActive = false;
+    this.cinematicTimer = 0;
+    this.cinematicBlend = 0;
+    this.cinematicLandmark = null;
+    this.landmarkShotCooldowns.set('sanctuary', 12);
     this.landingRequested = false;
     this.activeRiderRig.root.visible = false;
     this.phase = 'flying';
@@ -1732,6 +2027,19 @@ export class DragonEngine {
     this.maneuverSide = 0;
     this.maneuverIntensity = 0;
     this.maneuverFlashTimer = 0;
+    this.fusionActive = false;
+    this.fusionTimeLeft = 0;
+    this.spiritualBond = 25;
+    this.halfLoopBondPending = false;
+    this.bondReadyAnnounced = false;
+    this.playerRig.setFusionGlow(0);
+    this.windCurrentIntensity = 0;
+    this.windCurrentBoostTimer = 0;
+    this.wasInWindCurrent = false;
+    this.cinematicActive = false;
+    this.cinematicTimer = 0;
+    this.cinematicBlend = 0;
+    this.cinematicLandmark = null;
     this.landingRequested = false;
     this.activeRiderRig.root.visible = false;
     this.phase = 'resting';
@@ -1808,6 +2116,10 @@ export class DragonEngine {
     this.playerCrashing = false;
     this.playerCrashTimer = 0;
     this.knifeEdgeSide = 0;
+    this.cinematicActive = false;
+    this.cinematicTimer = 0;
+    this.cinematicBlend = 0;
+    this.landmarkShotCooldowns.delete(landmarkId);
     this.landingRequested = false;
     this.activeRiderRig.root.visible = false;
     this.playerRig.riderBodyGroup.visible = true;
@@ -2008,6 +2320,7 @@ export class DragonEngine {
         this.audio.playSwordSpark();
         this.impactShake = Math.max(this.impactShake, 0.36);
         this.audio.speakKnight('battle_cry', true);
+        this.addSpiritualBond(14, false);
       } else if (Math.random() < 0.45) {
         this.audio.speakKnight('battle_cry');
       }
@@ -2378,20 +2691,31 @@ export class DragonEngine {
       .lerp(_fogColorVolcanic, this.volcanicZoneFactor * 0.82)
       .lerp(_fogColorFlash, combinedFlicker * 0.45);
     const baseDensity = THREE.MathUtils.lerp(
-      0.00021,
-      THREE.MathUtils.lerp(0.0011, 0.0020, rainToStorm),
+      0.000125,
+      THREE.MathUtils.lerp(0.00088, 0.00175, rainToStorm),
       clearToRain,
     );
     const altFogScale = Math.max(0.32, 1 - Math.max(0, focusPos.y - 160) / 860);
     fog.density =
       THREE.MathUtils.lerp(
         baseDensity,
-        Math.max(baseDensity, 0.00148),
+        Math.max(baseDensity, 0.00132),
         this.volcanicZoneFactor,
       ) * altFogScale;
     (this.scene.background as THREE.Color).copy(fog.color);
 
-    // 2. Update sky dome, UE5 volumetric cloud shader, volumetric smoke & ocean shader uniforms
+    // 2. Dynamic Sun Arc, Prevailing Cloud Wind Advection & Synchronized Sun-Projected Cloud Shadows
+    const sunAzimuth = -0.86 + elapsed * 0.015;
+    const sunElevation = 0.27 + 0.16 * (0.5 + 0.5 * Math.sin(elapsed * 0.032 + 0.32));
+    const sunCosEl = Math.cos(sunElevation);
+    this.sunDir
+      .set(Math.cos(sunAzimuth) * sunCosEl, Math.sin(sunElevation), Math.sin(sunAzimuth) * sunCosEl)
+      .normalize();
+
+    this.cloudWindOffset.x += (11.5 + effectiveStorm * 8.5) * dt;
+    this.cloudWindOffset.y += (4.2 + effectiveStorm * 3.2) * dt;
+
+    this.world.skyMaterial.uniforms.sunDir.value.copy(this.sunDir);
     this.world.skyMaterial.uniforms.uStormFactor.value = effectiveStorm;
     this.world.skyMaterial.uniforms.uLightning.value = Math.max(flicker, volcanicFlicker * 0.72);
     this.world.cloudMaterial.uniforms.uTime.value = elapsed;
@@ -2401,14 +2725,101 @@ export class DragonEngine {
       volcanicFlicker,
       flicker * 0.65,
     );
+    this.world.cloudShadowUniforms.uTime.value = elapsed;
+    this.world.cloudShadowUniforms.uSunDir.value.copy(this.sunDir);
+    this.world.cloudShadowUniforms.uWindOffset.value.copy(this.cloudWindOffset);
+    this.world.cloudShadowUniforms.uStormFactor.value = effectiveStorm;
+    this.smokeMat.uniforms.uSunDir.value.copy(this.sunDir);
+
+    // Sync CPU cloud cluster centers with GPU wind/eddy motion & select nearest 20 large cloud shadows
+    const clusters = this.world.cloudClusters;
+    for (let k = 0; k < MAX_CLOUD_SHADOWS; k++) {
+      this.shadowBestScores[k] = Infinity;
+      this.shadowBestIndices[k] = -1;
+    }
+    const sunSlopeX = this.sunDir.x / Math.max(0.22, this.sunDir.y);
+    const sunSlopeZ = this.sunDir.z / Math.max(0.22, this.sunDir.y);
+    const windOx = this.cloudWindOffset.x;
+    const windOy = this.cloudWindOffset.y;
+
+    for (let i = 0; i < clusters.length; i++) {
+      const cl = clusters[i];
+      const volc = cl.isVolcanic ? 1 : 0;
+      const windPace = 1 + effectiveStorm * 0.95 + volc * 0.85;
+      let cx = cl.baseCenter.x;
+      let cz = cl.baseCenter.z;
+      if (!cl.isVolcanic) {
+        cx = ((((cx + windOx + CLOUD_WRAP_HALF) % CLOUD_WRAP_SPAN) + CLOUD_WRAP_SPAN) % CLOUD_WRAP_SPAN) - CLOUD_WRAP_HALF;
+        cz = ((((cz + windOy + CLOUD_WRAP_HALF) % CLOUD_WRAP_SPAN) + CLOUD_WRAP_SPAN) % CLOUD_WRAP_SPAN) - CLOUD_WRAP_HALF;
+      }
+      const cy =
+        cl.baseY +
+        Math.sin(elapsed * 0.42 * windPace + cl.driftPhase) *
+          (3.2 + volc * 3.8 + effectiveStorm * 2.2);
+      cx += Math.cos(elapsed * 0.21 + cl.driftPhase) * 4.5;
+      cz += Math.cos(elapsed * 0.11 * windPace + cl.driftPhase * 1.3) * (8 + volc * 11 + effectiveStorm * 7);
+      cl.center.set(cx, cy, cz);
+
+      // Ground-projected shadow center around y=25 to rank clouds whose shadows fall near the player
+      const hAbove = Math.max(0, cy - 25);
+      const gx = cx - sunSlopeX * hAbove;
+      const gz = cz - sunSlopeZ * hAbove;
+      const score = Math.hypot(gx - focusPos.x, gz - focusPos.z) - cl.radius * 4.5;
+
+      // Insert into fixed 20-slot top list (zero allocations)
+      let worstSlot = 0;
+      let worstScore = this.shadowBestScores[0];
+      for (let k = 1; k < MAX_CLOUD_SHADOWS; k++) {
+        if (this.shadowBestScores[k] > worstScore) {
+          worstScore = this.shadowBestScores[k];
+          worstSlot = k;
+        }
+      }
+      if (score < worstScore) {
+        this.shadowBestScores[worstSlot] = score;
+        this.shadowBestIndices[worstSlot] = i;
+      }
+    }
+
+    const shadowSlots = this.world.cloudShadowUniforms.uCloudShadows.value;
+    const shadowMeta = this.world.cloudShadowUniforms.uCloudShadowMeta.value;
+    for (let k = 0; k < MAX_CLOUD_SHADOWS; k++) {
+      const idx = this.shadowBestIndices[k];
+      if (idx < 0) {
+        shadowSlots[k].set(0, -9999, 0, 1);
+        shadowMeta[k].set(0, 0, 0, 0);
+      } else {
+        const cl = clusters[idx];
+        const edgeDist = Math.max(Math.abs(cl.center.x), Math.abs(cl.center.z));
+        const borderFade = cl.isVolcanic
+          ? 1
+          : 1 - THREE.MathUtils.smoothstep(edgeDist, CLOUD_WRAP_HALF - 420, CLOUD_WRAP_HALF);
+        const density = (cl.isVolcanic ? 0.98 : cl.radius > 72 ? 0.92 : 0.84) * borderFade;
+        shadowSlots[k].set(cl.center.x, cl.center.y, cl.center.z, cl.radius);
+        shadowMeta[k].set(cl.driftPhase, cl.isVolcanic ? 1 : 0, density, 0);
+      }
+    }
+
+    if (this.phase === 'flying' || this.phase === 'boarding') {
+      this.world.cloudMaterial.uniforms.uPlayerPos.value.copy(this.playerPos);
+      this.world.cloudMaterial.uniforms.uPlayerSpeed.value = this.playerSpeed;
+    } else if (this.phase === 'skydiving') {
+      this.world.cloudMaterial.uniforms.uPlayerPos.value.copy(this.riderPos);
+      this.world.cloudMaterial.uniforms.uPlayerSpeed.value = 42;
+    } else {
+      this.world.cloudMaterial.uniforms.uPlayerPos.value.set(0, -9999, 0);
+      this.world.cloudMaterial.uniforms.uPlayerSpeed.value = 0;
+    }
+    this.world.windRibbonMaterial.uniforms.uTime.value = elapsed;
+    this.world.windRibbonMaterial.uniforms.uStormFactor.value = effectiveStorm;
+    this.world.windStreakMaterial.uniforms.uTime.value = elapsed;
+    this.world.windStreakMaterial.uniforms.uStormFactor.value = effectiveStorm;
     this.smokeMat.uniforms.uTime.value = elapsed;
     this.smokeMat.uniforms.uStormFactor.value = effectiveStorm;
     this.smokeMat.uniforms.uLightning.value = combinedFlicker;
 
     if (this.world.oceanMaterial.userData.shader) {
       const uniforms = this.world.oceanMaterial.userData.shader.uniforms;
-      uniforms.uTime.value = elapsed;
-      uniforms.uStormFactor.value = effectiveStorm;
       uniforms.uLightning.value = Math.max(flicker, volcanicFlicker * 0.78);
       if (uniforms.uDragonWakePos) {
         uniforms.uDragonWakePos.value.set(
@@ -2432,7 +2843,7 @@ export class DragonEngine {
     }
 
     // 3. Modulate UE5 balanced lighting + electric specular lightning on dragon scales & ocean
-    this.sunLight.intensity = THREE.MathUtils.lerp(2.15, 0.42, effectiveStorm);
+    this.sunLight.intensity = THREE.MathUtils.lerp(2.25, 0.44, effectiveStorm);
     this.sunLight.color.copy(_sunColorClear).lerp(_sunColorStorm, effectiveStorm);
     this.hemiLight.intensity =
       THREE.MathUtils.lerp(0.36, 0.22, effectiveStorm) + combinedFlicker * 0.58;
@@ -2505,10 +2916,12 @@ export class DragonEngine {
     this.lightningBolt.visible = combinedFlicker > 0.08;
     this.lightningMat.opacity = Math.min(1, combinedFlicker * 1.35);
 
-    // Refresh CubeMap sky reflection when storm band shifts
+    // Refresh CubeMap sky reflection when storm band or solar arc shifts
     const stormBand = Math.round(effectiveStorm * 2);
-    if (stormBand !== this.lastReflectionStormBand) {
+    const sunBucket = Math.floor(elapsed / 8);
+    if (stormBand !== this.lastReflectionStormBand || sunBucket !== this.lastSunReflectionBucket) {
       this.lastReflectionStormBand = stormBand;
+      this.lastSunReflectionBucket = sunBucket;
       this.updateOceanReflection();
     }
 
@@ -2563,7 +2976,11 @@ export class DragonEngine {
     const tx = Math.round(focusPos.x / 8) * 8;
     const tz = Math.round(focusPos.z / 8) * 8;
     this.sunLight.target.position.set(tx, 0, tz);
-    this.sunLight.position.set(tx + 240, 175, tz - 210);
+    this.sunLight.position.set(
+      tx + this.sunDir.x * 340,
+      Math.max(85, this.sunDir.y * 340),
+      tz + this.sunDir.z * 340,
+    );
 
     for (const ship of this.world.pirateShips) {
       if (ship.destroyed) {
@@ -2747,6 +3164,23 @@ export class DragonEngine {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toastMessage = null;
     }
+    if (this.flightTipMinGapTimer > 0) {
+      this.flightTipMinGapTimer = Math.max(0, this.flightTipMinGapTimer - dt);
+    }
+    if (this.flightTipTimer > 0) {
+      this.flightTipTimer -= dt;
+      if (this.flightTipTimer <= 0) {
+        this.activeFlightTip = null;
+      }
+    }
+    for (const [tipId, cd] of this.flightTipCooldowns) {
+      const next = cd - dt;
+      if (next <= 0) {
+        this.flightTipCooldowns.delete(tipId);
+      } else {
+        this.flightTipCooldowns.set(tipId, next);
+      }
+    }
     if (this.knightSpeechTimer > 0) {
       this.knightSpeechTimer -= dt;
       if (this.knightSpeechTimer <= 0) {
@@ -2879,12 +3313,75 @@ export class DragonEngine {
     this.breathImpactVfxTimer = Math.max(0, this.breathImpactVfxTimer - dt);
     this.updateMotionBlurAndStreaks(dt, elapsed);
 
+    const hpRatio = this.hp / Math.max(1, this.maxHp);
+    const targetScarSev =
+      hpRatio < 0.84 ? THREE.MathUtils.clamp(Math.pow((0.84 - hpRatio) / 0.72, 0.88), 0, 1) : 0;
+    this.playerScarSeverity = THREE.MathUtils.damp(this.playerScarSeverity, targetScarSev, 5.5, dt);
+    this.playerRig.setDamageScars(this.playerScarSeverity, elapsed);
+
+    this.woundEmberTimer -= dt;
+    if (
+      this.playerScarSeverity > 0.3 &&
+      this.phase !== 'sanctuary_bond' &&
+      this.woundEmberTimer <= 0
+    ) {
+      this.woundEmberTimer = THREE.MathUtils.lerp(0.16, 0.045, this.playerScarSeverity);
+      const isIce = this.activeElement === 'ice';
+      const sparkStart = isIce ? 0xfda4af : 0xff7b29;
+      const sparkEnd = isIce ? 0x38bdf8 : 0xdc2626;
+      const sx = this.playerRig.root.position.x + (Math.random() - 0.5) * 3.4;
+      const sy = this.playerRig.root.position.y + (Math.random() - 0.35) * 1.8;
+      const sz = this.playerRig.root.position.z + (Math.random() - 0.5) * 4.2;
+      this.spawnElemParticle(
+        sx,
+        sy,
+        sz,
+        (Math.random() - 0.5) * 4.5,
+        2.4 + Math.random() * 4.2,
+        (Math.random() - 0.5) * 4.5,
+        sparkStart,
+        sparkEnd,
+        0.45 + Math.random() * 0.35,
+        0.16 + this.playerScarSeverity * 0.14,
+        0.02,
+        -1.5,
+        1.8,
+        Math.random() < 0.5 ? 0 : 1,
+      );
+      if (this.playerScarSeverity > 0.55 && Math.random() < 0.45) {
+        this.spawnSmoke(
+          sx,
+          sy,
+          sz,
+          (Math.random() - 0.5) * 2.2,
+          1.8 + Math.random() * 2.4,
+          (Math.random() - 0.5) * 2.2,
+          isIce ? 0x475569 : 0x292524,
+          0.85,
+          0.45,
+          1.65,
+          2.2,
+          isIce ? 0.1 : 0.32,
+          0.6,
+        );
+      }
+    }
+
+    if (this.phase !== 'flying') {
+      this.windCurrentIntensity = THREE.MathUtils.damp(this.windCurrentIntensity, 0, 5.5, dt);
+      this.windCurrentBoostTimer = Math.max(0, this.windCurrentBoostTimer - dt);
+      this.wasInWindCurrent = false;
+      this.currentTurnIntensity = THREE.MathUtils.damp(this.currentTurnIntensity, 0, 6.0, dt);
+    }
+
     this.audio.updateAmbience(
       this.playerSpeed,
       isSkimmingWater,
       this.phase === 'flying' || this.phase === 'boarding' || this.phase === 'skydiving',
       this.rainIntensity,
       this.stormIntensity,
+      this.windCurrentIntensity,
+      this.currentTurnIntensity,
     );
 
     this.hudEmitTimer += dt;
@@ -2909,8 +3406,10 @@ export class DragonEngine {
       const speedFactor = THREE.MathUtils.clamp((this.playerSpeed - 68) / 56, 0, 1);
       const diveFactor = this.diveTuckFactor * 0.78;
       const boostPulse = boosting ? 0.65 + speedFactor * 0.35 : 0;
+      const fusionBlur = this.fusionActive ? 0.42 : 0;
+      const windBlur = this.windCurrentIntensity * 0.52;
       targetBlur = THREE.MathUtils.clamp(
-        Math.max(speedFactor * 0.88, boostPulse, diveFactor),
+        Math.max(speedFactor * 0.88, boostPulse, diveFactor, fusionBlur, windBlur),
         0,
         1,
       );
@@ -2952,6 +3451,8 @@ export class DragonEngine {
       );
       if (this.boostVisualFactor > 0.35) {
         this.speedStreakMat.color.setHex(0xffe7c4);
+      } else if (this.windCurrentIntensity > 0.28) {
+        this.speedStreakMat.color.setHex(0xbbeeff);
       } else {
         this.speedStreakMat.color.setHex(0xeaf6ff);
       }
@@ -3096,15 +3597,87 @@ export class DragonEngine {
       (Math.cos(elapsed * 1.85) * 0.6 + Math.sin(elapsed * 4.25) * 0.4) *
       this.stormIntensity;
 
+    // Active Spiritual Fusion state & glow update
+    const fusionSpeedMul = this.fusionActive ? 1.26 : 1.0;
+    const fusionTurnMul = this.fusionActive ? 1.25 : 1.0;
+    if (this.fusionActive) {
+      this.fusionTimeLeft = Math.max(0, this.fusionTimeLeft - dt);
+      this.spiritualBond = THREE.MathUtils.clamp(
+        (this.fusionTimeLeft / Math.max(1, this.fusionDuration)) * 100,
+        0,
+        100,
+      );
+      this.hp = Math.min(this.maxHp, this.hp + dt * 4.5);
+      this.energy = this.maxEnergy;
+
+      const fusionHex =
+        this.activeElement === 'ice'
+          ? 0x7dd3fc
+          : this.activeElement === 'rock'
+            ? 0xfacc15
+            : 0xffb347;
+      const pulse = 0.92 + Math.sin(elapsed * 8.5) * 0.22;
+      this.playerRig.setFusionGlow(pulse, fusionHex);
+
+      this.fusionParticleTimer -= dt;
+      if (this.fusionParticleTimer <= 0) {
+        this.fusionParticleTimer = 0.045;
+        this.spawnElemParticle(
+          this.playerPos.x + (Math.random() - 0.5) * 5.2,
+          this.playerPos.y + (Math.random() - 0.5) * 3.0,
+          this.playerPos.z + (Math.random() - 0.5) * 5.2,
+          (Math.random() - 0.5) * 8,
+          2 + Math.random() * 5,
+          (Math.random() - 0.5) * 8,
+          0xffffff,
+          fusionHex,
+          0.42,
+          0.9,
+          2.6,
+          0,
+          1.1,
+          Math.random() < 0.5 ? 0 : 1,
+        );
+      }
+
+      if (this.fusionTimeLeft <= 0) {
+        this.fusionActive = false;
+        this.spiritualBond = 0;
+        this.playerRig.setFusionGlow(0);
+        this.showToast('انتهت مدة الاندماج الروحي');
+      }
+    } else if (this.spiritualBond >= 100) {
+      const readyHex =
+        this.activeElement === 'ice'
+          ? 0x7dd3fc
+          : this.activeElement === 'rock'
+            ? 0xfacc15
+            : 0xffb347;
+      this.playerRig.setFusionGlow(0.16 + Math.sin(elapsed * 4.2) * 0.05, readyHex);
+    } else {
+      this.playerRig.setFusionGlow(0);
+    }
+
     // Gimbal-free quaternion flight: climbing upward smoothly loops in a half-circle around itself!
     if (this.halfLoopRemaining > 0) {
       const loopStep = Math.min(this.halfLoopRemaining, 2.85 * dt);
       this.halfLoopRemaining -= loopStep;
       _qPitch.setFromAxisAngle(_unitX, loopStep);
       this.flightQuat.multiply(_qPitch);
+      if (this.halfLoopRemaining <= 0.05 && this.halfLoopBondPending) {
+        this.halfLoopBondPending = false;
+        this.addSpiritualBond(24, true);
+        this.presentFlightTip({
+          id: 'maneuver_half_loop',
+          category: 'maneuver',
+          titleAr: 'مناورة الالتفاف النصف دائري (Half-Loop)',
+          mechanicTagAr: 'X · عكس المسار + تفادي الهجمات',
+          bodyAr: 'تقلب اتجاه تحليقك فوراً لمباغتة التنانين المعادية من الخلف وتمنح شحنة كبيرة للرابطة الروحية.',
+        });
+      }
     } else {
-      const yawDelta = (turnInput * spec.turnRate + gustX * 0.24) * dt;
-      const pitchDelta = (pitchInput * 1.55 + gustY * 0.16) * dt;
+      const yawDelta = (turnInput * spec.turnRate * fusionTurnMul + gustX * 0.24) * dt;
+      const pitchDelta = (pitchInput * 1.55 * fusionTurnMul + gustY * 0.16) * dt;
       _qPitch.setFromAxisAngle(_unitX, pitchDelta);
       this.flightQuat.multiply(_qPitch);
       _qYaw.setFromAxisAngle(_unitY, yawDelta);
@@ -3217,6 +3790,60 @@ export class DragonEngine {
       }
     }
 
+    // Spiritual Bond Maneuver Charging (Knife Edge, Sharp Turns, Steep Dive & Pull-Up)
+    this.knifeEdgeChimeCooldown = Math.max(0, this.knifeEdgeChimeCooldown - dt);
+    this.sharpTurnBondCooldown = Math.max(0, this.sharpTurnBondCooldown - dt);
+    this.divePullupCooldown = Math.max(0, this.divePullupCooldown - dt);
+    if (!this.fusionActive) {
+      if (this.knifeEdgeSide !== 0) {
+        this.knifeEdgeBondTimer += dt;
+        if (this.knifeEdgeBondTimer > 0.22) {
+          this.addSpiritualBond(14 * dt, false);
+        }
+      } else {
+        this.knifeEdgeBondTimer = 0;
+      }
+
+      if (this.maneuverKind === 'sharp_turn' && this.maneuverIntensity > 0.55) {
+        this.sharpTurnBondTimer += dt;
+        this.addSpiritualBond(8.5 * dt, false);
+        if (this.sharpTurnBondTimer >= 0.36 && this.sharpTurnBondCooldown <= 0) {
+          this.addSpiritualBond(11, true);
+          this.sharpTurnBondCooldown = 2.4;
+          this.sharpTurnBondTimer = 0;
+          this.presentFlightTip({
+            id: 'maneuver_sharp_turn',
+            category: 'maneuver',
+            titleAr: 'انعطاف قتالي حاد ناجح',
+            mechanicTagAr: 'A/D + Shift · دوران ضيق + رفع أعلى',
+            bodyAr: 'الجمع بين الانعطاف الحاد والتعزيز (Shift) يرفع وتيرة خفق الأجنحة لزيادة الرفع وتضييق قوس الدوران.',
+          });
+        }
+      } else {
+        this.sharpTurnBondTimer = Math.max(0, this.sharpTurnBondTimer - dt * 2);
+      }
+
+      if (this.diveTuckFactor > 0.54) {
+        this.wasDivingDeep = true;
+        this.addSpiritualBond(9.5 * dt, false);
+      } else if (this.wasDivingDeep && currentPitchSlope > 0.16) {
+        this.wasDivingDeep = false;
+        if (this.divePullupCooldown <= 0) {
+          this.addSpiritualBond(15, true);
+          this.divePullupCooldown = 2.6;
+          this.presentFlightTip({
+            id: 'maneuver_dive_pullup',
+            category: 'maneuver',
+            titleAr: 'مناورة الانقضاض والانسحاب للأعلى',
+            mechanicTagAr: 'C للانقضاض + صعود · زخم فائق',
+            bodyAr: 'يطوي التنين أجنحته عند الانقضاض لتقليل مقاومة الهواء وبلوغ سرعة خارقة قبل الصعود وشحن الرابطة.',
+          });
+        }
+      } else if (this.diveTuckFactor < 0.12 && currentPitchSlope <= 0.16) {
+        this.wasDivingDeep = false;
+      }
+    }
+
     // 1. Gravity (amplified when wings are tucked cleanly into a dive)
     this.velocity.y -= (22.0 + 16.5 * this.diveTuckFactor) * dt;
 
@@ -3230,27 +3857,116 @@ export class DragonEngine {
     const loopLift = this.halfLoopRemaining > 0 ? 18.0 : 0;
     this.velocity.addScaledVector(_up, (baseLift + loopLift) * dt);
 
-    // 3. Thrust + High-Speed Dive Tuck Acceleration + Climb Reserve
+    // 2b. Sky Wind Currents (تيارات هوائية) detection & slipstream acceleration
+    let detectedWindIntensity = 0;
+    let detectedWindStrength = 1;
+    _windDir.set(0, 0, 0);
+    _windBestPt.copy(this.playerPos);
+    for (const stream of this.world.windCurrents) {
+      const pts = stream.points;
+      const tans = stream.tangents;
+      const rSq = stream.radius * stream.radius;
+      let bestDistSq = rSq;
+      let hit = false;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        _windSeg.copy(b).sub(a);
+        const lenSq = _windSeg.lengthSq();
+        if (lenSq < 0.001) continue;
+        const proj = THREE.MathUtils.clamp(
+          _v1.copy(this.playerPos).sub(a).dot(_windSeg) / lenSq,
+          0,
+          1,
+        );
+        _closestPt.copy(a).addScaledVector(_windSeg, proj);
+        const dSq = this.playerPos.distanceToSquared(_closestPt);
+        if (dSq < bestDistSq) {
+          bestDistSq = dSq;
+          hit = true;
+          _windBestPt.copy(_closestPt);
+          _v2.copy(tans[i]).lerp(tans[i + 1], proj).normalize();
+          _windDir.copy(_v2);
+        }
+      }
+      if (hit) {
+        const dist = Math.sqrt(bestDistSq);
+        const prox = 1 - THREE.MathUtils.smoothstep(dist, stream.radius * 0.22, stream.radius);
+        if (prox > detectedWindIntensity) {
+          detectedWindIntensity = prox;
+          detectedWindStrength = stream.strength;
+        }
+      }
+    }
+
+    this.windCurrentIntensity = THREE.MathUtils.damp(
+      this.windCurrentIntensity,
+      detectedWindIntensity,
+      detectedWindIntensity > this.windCurrentIntensity ? 7.5 : 4.0,
+      dt,
+    );
+
+    if (detectedWindIntensity > 0.14) {
+      if (!this.wasInWindCurrent) {
+        this.wasInWindCurrent = true;
+        this.audio.playWindCurrentEnter();
+        this.presentFlightTip({
+          id: 'maneuver_wind_current',
+          category: 'maneuver',
+          titleAr: 'دخول تيار هوائي نشط',
+          mechanicTagAr: 'تيار سماوي · تسارع مجاني',
+          bodyAr: 'البقاء داخل مسار التيار الهوائي يضاعف سرعتك تلقائياً دون استهلاك طاقة التنين ويشحن الرابطة الروحية.',
+        });
+      }
+      this.windCurrentBoostTimer = 1.15;
+      const alignment = THREE.MathUtils.clamp(_forward.dot(_windDir), -0.25, 1);
+      const slipstreamForce =
+        detectedWindStrength * (28 + Math.max(0, alignment) * 28) * detectedWindIntensity;
+      this.velocity.addScaledVector(_windDir, slipstreamForce * dt);
+
+      // Gentle aerodynamic centering pull toward the wind tunnel core
+      _v1.copy(_windBestPt).sub(this.playerPos);
+      this.velocity.addScaledVector(_v1, 1.35 * detectedWindIntensity * dt);
+
+      if (!this.fusionActive) {
+        this.addSpiritualBond(6.5 * detectedWindIntensity * dt, false);
+      }
+    } else {
+      this.wasInWindCurrent = false;
+      this.windCurrentBoostTimer = Math.max(0, this.windCurrentBoostTimer - dt);
+    }
+
+    const windSurgeMul =
+      1 +
+      Math.max(
+        this.windCurrentIntensity * 0.34,
+        this.windCurrentBoostTimer > 0 ? (this.windCurrentBoostTimer / 1.15) * 0.24 : 0,
+      );
+
+    // 3. Thrust + High-Speed Dive Tuck Acceleration + Climb Reserve + Fusion Surge + Wind Current Surge
     const wingSpeedBonus = this.progression.dragonUpgrades.wings * 6.5;
     const climbReserve = currentPitchSlope > 0.15 ? 14.0 * currentPitchSlope : 0;
     const diveDrive = 48.0 * this.diveTuckFactor;
     const thrustAccel =
-      (boosting
+      ((boosting
         ? (spec.baseSpeed + wingSpeedBonus) * 1.24
         : braking
           ? (spec.baseSpeed + wingSpeedBonus) * 0.14
           : (spec.baseSpeed + wingSpeedBonus) * 0.72) +
-      climbReserve +
-      diveDrive;
+        climbReserve +
+        diveDrive) *
+      fusionSpeedMul *
+      windSurgeMul;
     this.velocity.addScaledVector(_forward, thrustAccel * dt);
 
-    // 4. Quadratic aerodynamic air resistance (dramatically lower drag while wings are tucked into body!)
+    // 4. Quadratic aerodynamic air resistance (dramatically lower drag while wings are tucked or inside a wind stream!)
     const curSpeed = this.velocity.length();
     const dragCoeff =
       0.0082 *
       (1 + this.rainIntensity * 0.28) *
       (braking ? 1.85 : 1.0) *
-      (1 - 0.54 * this.diveTuckFactor);
+      (1 - 0.54 * this.diveTuckFactor) *
+      (1 - 0.26 * this.windCurrentIntensity);
     this.velocity.addScaledVector(this.velocity, -dragCoeff * curSpeed * dt);
 
     // 5. Weathercock / Wing-Keel Side-Slip Damping (banking carves curved turns with real inertia)
@@ -3278,14 +3994,14 @@ export class DragonEngine {
     // Integrate real world position
     this.playerPos.addScaledVector(this.velocity, dt);
 
-    // Soft aerodynamic windwall boundary at expanded 5600m open-world edge (2550m radius)
+    // Soft aerodynamic windwall boundary at expanded 10400m open-world edge (4750m radius)
     const distFromOrigin = Math.hypot(this.playerPos.x, this.playerPos.z);
-    if (distFromOrigin > 2550) {
-      const pull = (distFromOrigin - 2550) / 120;
+    if (distFromOrigin > 4750) {
+      const pull = (distFromOrigin - 4750) / 180;
       _v1.set(-this.playerPos.x, 0, -this.playerPos.z).normalize();
-      this.velocity.addScaledVector(_v1, pull * 45 * dt);
-      this.playerPos.x = THREE.MathUtils.lerp(this.playerPos.x, 0, pull * dt * 0.25);
-      this.playerPos.z = THREE.MathUtils.lerp(this.playerPos.z, 0, pull * dt * 0.25);
+      this.velocity.addScaledVector(_v1, pull * 48 * dt);
+      this.playerPos.x = THREE.MathUtils.lerp(this.playerPos.x, 0, pull * dt * 0.2);
+      this.playerPos.z = THREE.MathUtils.lerp(this.playerPos.z, 0, pull * dt * 0.2);
     }
 
     // 7. Real Destructible Ramming Physics (Buildings, Golden Beach Palm Trees, Pirate Ships)
@@ -3456,7 +4172,10 @@ export class DragonEngine {
         this.velocity.y = Math.max(this.velocity.y, 8);
 
         if (dmgToEnemy > 0) {
-          ai.hp -= dmgToEnemy;
+          ai.hp -= this.fusionActive ? Math.round(dmgToEnemy * 1.65) : dmgToEnemy;
+          if (dmgToEnemy >= finalPlayerDmg) {
+            this.addSpiritualBond(14, true);
+          }
           if (ai.hp <= 0) {
             this.killEnemyDragon(ai, false);
           }
@@ -3490,6 +4209,10 @@ export class DragonEngine {
           [-480, -560],
           [-1520, -1500],
           [-1600, 1220],
+          [2950, -2350],
+          [2450, 2780],
+          [-360, -3350],
+          [-3250, 260],
         ];
         let bestTarget = shoreTargets[0];
         let bestD = Infinity;
@@ -3644,19 +4367,42 @@ export class DragonEngine {
     this.playerRig.root.position.copy(this.playerPos);
     this.playerRig.root.quaternion.copy(_finalQuat);
 
-    // Wingbeat & Aerodynamic Dive Wing-Fold Kinematics
-    const flapSpeed = this.landingRequested
-      ? 10.2
+    const wingSpeedNorm = THREE.MathUtils.clamp((this.playerSpeed - 20) / 95, 0, 1.35);
+    const wingTurnNorm = THREE.MathUtils.clamp(
+      Math.max(absTurn, absRoll / (Math.PI * 0.5)),
+      0,
+      1,
+    );
+    this.currentTurnIntensity = THREE.MathUtils.damp(
+      this.currentTurnIntensity,
+      wingTurnNorm,
+      8,
+      dt,
+    );
+
+    // Wingbeat & Aerodynamic Dive Wing-Fold Kinematics (cadence scales with speed & turn/bank angle)
+    const baseFlapSpeed = this.landingRequested
+      ? 10.4 + wingTurnNorm * 1.6
       : this.diveTuckFactor > 0.35
-        ? 1.8
-        : pitchSlope > 0.1 || boosting
-          ? 9.2
-          : 5.6;
+        ? 1.8 + wingTurnNorm * 2.4
+        : (pitchSlope > 0.1 || boosting ? 7.6 : 5.0) +
+          wingSpeedNorm * 3.4 +
+          wingTurnNorm * 2.8;
+    const flapSpeed = THREE.MathUtils.clamp(baseFlapSpeed, 1.8, 13.8);
     this.wingPhase += dt * flapSpeed;
     const flap = Math.sin(this.wingPhase);
     const sign = flap >= 0 ? 1 : -1;
-    if (sign !== this.lastWingSign && sign < 0 && flapSpeed > 4.2 && this.diveTuckFactor < 0.55) {
-      this.audio.playWingbeat();
+    if (sign !== this.lastWingSign && sign < 0 && flapSpeed > 3.6 && this.diveTuckFactor < 0.58) {
+      this.audio.playWingbeat({
+        speed: this.playerSpeed,
+        bankAngleRad: this.playerRoll,
+        turnIntensity: this.currentTurnIntensity,
+        boosting,
+        climbing: pitchSlope > 0.1,
+        landing: this.landingRequested,
+        windCurrent: this.windCurrentIntensity,
+        element: this.activeElement,
+      });
     }
     this.lastWingSign = sign;
 
@@ -3665,26 +4411,50 @@ export class DragonEngine {
       : this.knifeEdgeSide !== 0
         ? 0.24
         : 0.46;
-    const flapAmp = baseFlapAmp * (1 - this.diveTuckFactor * 0.92);
+    const wc = this.windCurrentIntensity;
+    const flapAmp = baseFlapAmp * (1 - this.diveTuckFactor * 0.92) * (1 - wc * 0.28);
     const wingTuck = this.knifeEdgeSide !== 0 ? 0.34 : 0;
 
-    // Sweeping wings tightly backward & down against flanks during steep dives
+    // Sweeping wings tightly backward & down against flanks during steep dives, plus aeroelastic sweep & flutter in Wind Currents
     const diveSweepInnerY = 0.98 * this.diveTuckFactor;
     const diveSweepOuterY = 0.34 * this.diveTuckFactor;
     const diveHugZ = 0.24 * this.diveTuckFactor;
     const diveOuterFoldZ = 0.55 * this.diveTuckFactor;
 
-    this.playerRig.leftWingInner.rotation.y = diveSweepInnerY;
-    this.playerRig.leftWingOuter.rotation.y = diveSweepOuterY;
-    this.playerRig.rightWingInner.rotation.y = -diveSweepInnerY;
-    this.playerRig.rightWingOuter.rotation.y = -diveSweepOuterY;
+    const windSweepInnerY = 0.18 * wc * (1 - this.diveTuckFactor);
+    const windSweepOuterY = 0.14 * wc * (1 - this.diveTuckFactor);
+    const windLiftCamberZ = 0.075 * wc * (1 - this.diveTuckFactor);
+    const windFlutterL =
+      (Math.sin(elapsed * 26.5) * 0.068 + Math.sin(elapsed * 17.5 + 0.6) * 0.032) * wc;
+    const windFlutterR =
+      (Math.cos(elapsed * 26.5 + 0.9) * 0.068 + Math.cos(elapsed * 18.2) * 0.032) * wc;
+    const windTwistL = Math.sin(elapsed * 21.5) * 0.078 * wc;
+    const windTwistR = Math.cos(elapsed * 21.5 + 0.7) * 0.078 * wc;
 
-    this.playerRig.leftWingInner.rotation.z = flap * flapAmp - wingTuck + diveHugZ;
+    this.playerRig.leftWingInner.rotation.y = diveSweepInnerY + windSweepInnerY;
+    this.playerRig.leftWingOuter.rotation.y = diveSweepOuterY + windSweepOuterY;
+    this.playerRig.rightWingInner.rotation.y = -diveSweepInnerY - windSweepInnerY;
+    this.playerRig.rightWingOuter.rotation.y = -diveSweepOuterY - windSweepOuterY;
+
+    this.playerRig.leftWingInner.rotation.x = windTwistL * 0.45;
+    this.playerRig.rightWingInner.rotation.x = windTwistR * 0.45;
+    this.playerRig.leftWingOuter.rotation.x = windTwistL;
+    this.playerRig.rightWingOuter.rotation.x = windTwistR;
+
+    this.playerRig.leftWingInner.rotation.z =
+      flap * flapAmp - wingTuck + diveHugZ + windLiftCamberZ + windFlutterL * 0.45;
     this.playerRig.leftWingOuter.rotation.z =
-      Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 - wingTuck * 0.4 - diveOuterFoldZ;
-    this.playerRig.rightWingInner.rotation.z = -flap * flapAmp + wingTuck - diveHugZ;
+      Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 -
+      wingTuck * 0.4 -
+      diveOuterFoldZ +
+      windFlutterL;
+    this.playerRig.rightWingInner.rotation.z =
+      -flap * flapAmp + wingTuck - diveHugZ - windLiftCamberZ - windFlutterR * 0.45;
     this.playerRig.rightWingOuter.rotation.z =
-      -Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 + wingTuck * 0.4 + diveOuterFoldZ;
+      -Math.sin(this.wingPhase - 0.65) * flapAmp * 0.9 +
+      wingTuck * 0.4 +
+      diveOuterFoldZ -
+      windFlutterR;
 
     // Prominent Hind Leg & Talon Pose: clearly lowered & extended during landing OR lunging in aerial talon clash!
     const nearLandingGround =
@@ -3782,8 +4552,12 @@ export class DragonEngine {
 
     for (let i = 0; i < this.playerRig.tailSegments.length; i++) {
       this.playerRig.tailSegments[i].rotation.y =
-        Math.sin(elapsed * 4.5 - i * 0.6) * 0.09 + turnInput * 0.05;
-      this.playerRig.tailSegments[i].rotation.x = Math.cos(elapsed * 3.8 - i * 0.5) * 0.05;
+        Math.sin(elapsed * 4.5 - i * 0.6) * 0.09 +
+        turnInput * 0.05 +
+        Math.sin(elapsed * 19.5 - i * 0.85) * 0.06 * wc;
+      this.playerRig.tailSegments[i].rotation.x =
+        Math.cos(elapsed * 3.8 - i * 0.5) * 0.05 +
+        Math.cos(elapsed * 16.5 - i * 0.7) * 0.04 * wc;
     }
 
     const energyRegen = 7.8 + this.progression.knightUpgrades.spirit * 2.2;
@@ -3793,7 +4567,93 @@ export class DragonEngine {
       this.fireElementalBreath();
     }
 
-    // Camera Perspective: Full Dragon 3rd-Person View vs 1st-Person Rider View
+    // Auto-Cinematic Shots Director (اللقطات السينمائية التلقائية عند دخول المعالم الكبرى)
+    for (const [lmId, cd] of this.landmarkShotCooldowns) {
+      const nextCd = cd - dt;
+      if (nextCd <= 0) {
+        this.landmarkShotCooldowns.delete(lmId);
+      } else {
+        this.landmarkShotCooldowns.set(lmId, nextCd);
+      }
+    }
+
+    if (this.cinematicActive) {
+      this.cinematicTimer += dt;
+      if (
+        !this.autoCinematicEnabled ||
+        this.landingRequested ||
+        this.playerCrashing ||
+        this.boardingTarget !== null ||
+        this.cinematicTimer >= this.cinematicDuration
+      ) {
+        this.cinematicActive = false;
+      }
+    } else if (
+      this.autoCinematicEnabled &&
+      !this.landingRequested &&
+      !this.playerCrashing &&
+      this.boardingTarget === null
+    ) {
+      for (const lm of WORLD_LANDMARKS) {
+        const isLargeOuter =
+          lm.id === 'volcanic_archipelago' ||
+          lm.id === 'enchanted_forest' ||
+          lm.id === 'eastern_sky_spires' ||
+          lm.id === 'southern_coral_atoll' ||
+          lm.id === 'northern_glacier_crown' ||
+          lm.id === 'western_storm_isles';
+        const discoveryRadius = isLargeOuter ? 420 : 240;
+        const d = Math.hypot(this.playerPos.x - lm.x, this.playerPos.z - lm.z);
+        if (!this.discoveredLandmarks.has(lm.id) && d < discoveryRadius) {
+          this.discoveredLandmarks.add(lm.id);
+          this.presentFlightTip(this.getLandmarkDiscoveryTip(lm), true);
+        }
+        if (lm.id === 'pirates') continue;
+        if (this.landmarkShotCooldowns.has(lm.id)) continue;
+        const triggerRadius = isLargeOuter ? 375 : 210;
+        if (d < triggerRadius) {
+          this.cinematicActive = true;
+          this.cinematicTimer = 0;
+          this.cinematicLandmark = lm;
+          this.cinematicShotStyle = ((this.cinematicShotStyle + 1) % 3) as 0 | 1 | 2;
+          this.landmarkShotCooldowns.set(lm.id, 32);
+          break;
+        }
+      }
+    } else {
+      for (const lm of WORLD_LANDMARKS) {
+        if (this.discoveredLandmarks.has(lm.id)) continue;
+        const isLargeOuter =
+          lm.id === 'volcanic_archipelago' ||
+          lm.id === 'enchanted_forest' ||
+          lm.id === 'eastern_sky_spires' ||
+          lm.id === 'southern_coral_atoll' ||
+          lm.id === 'northern_glacier_crown' ||
+          lm.id === 'western_storm_isles';
+        const discoveryRadius = isLargeOuter ? 420 : 240;
+        const d = Math.hypot(this.playerPos.x - lm.x, this.playerPos.z - lm.z);
+        if (d < discoveryRadius) {
+          this.discoveredLandmarks.add(lm.id);
+          this.presentFlightTip(this.getLandmarkDiscoveryTip(lm), true);
+          break;
+        }
+      }
+    }
+
+    let targetCineBlend = 0;
+    if (this.cinematicActive) {
+      const fadeIn = THREE.MathUtils.smoothstep(this.cinematicTimer, 0, 0.9);
+      const fadeOut =
+        1 - THREE.MathUtils.smoothstep(this.cinematicTimer, this.cinematicDuration - 0.95, this.cinematicDuration);
+      targetCineBlend = fadeIn * fadeOut;
+    }
+    this.cinematicBlend = THREE.MathUtils.damp(this.cinematicBlend, targetCineBlend, 5.2, dt);
+    if (!this.cinematicActive && this.cinematicBlend < 0.01) {
+      this.cinematicBlend = 0;
+      this.cinematicLandmark = null;
+    }
+
+    // Camera Perspective: Full Dragon 3rd-Person View vs 1st-Person Rider View + Auto-Cinematic Landmark Sweep
     this.playerRig.root.updateMatrixWorld(true);
     const shakeAmp =
       this.lightningPower * 0.16 + this.stormIntensity * 0.035 + this.impactShake;
@@ -3805,43 +4665,104 @@ export class DragonEngine {
       _up.set(0, 1, 0).applyQuaternion(this.flightQuat).normalize();
       const followDist = 21.5 + (boosting ? 3.2 : 0) + this.diveTuckFactor * 2.2;
       const chaseUp = 6.8 - this.landingLegExtend * 2.2;
-      _camTargetPos
+      _normCamPos
         .copy(this.playerPos)
         .addScaledVector(_forward, -followDist)
         .addScaledVector(_up, chaseUp);
 
-      const camGnd = getTerrainHeight(_camTargetPos.x, _camTargetPos.z);
+      const camGnd = getTerrainHeight(_normCamPos.x, _normCamPos.z);
       if (_up.y > 0.2) {
-        _camTargetPos.y = Math.max(_camTargetPos.y, Math.max(2.4, camGnd + 2.6));
+        _normCamPos.y = Math.max(_normCamPos.y, Math.max(2.4, camGnd + 2.6));
       }
-      _camTargetPos.x += Math.sin(elapsed * 43) * shakeAmp;
-      _camTargetPos.y += Math.cos(elapsed * 37) * shakeAmp;
+      _normCamPos.x += Math.sin(elapsed * 43) * shakeAmp;
+      _normCamPos.y += Math.cos(elapsed * 37) * shakeAmp;
 
       // Subtle tilt on full chase camera during 90° knife-edge flight so horizon remains legible
       _qRoll.setFromAxisAngle(_unitZ, this.playerRoll * 0.22);
       _quatA.copy(this.flightQuat).multiply(_qRoll);
-      _up.set(0, 1, 0).applyQuaternion(_quatA).normalize();
-
-      this.camera.position.lerp(_camTargetPos, 1 - Math.exp(-10.5 * dt));
-      this.dampCameraUp(_up, 6.5, dt);
-      _camLookAt.copy(this.playerPos).addScaledVector(_forward, 26).addScaledVector(_up, 1.4 - this.landingLegExtend * 0.8);
-      this.camera.lookAt(_camLookAt);
+      _normCamUp.set(0, 1, 0).applyQuaternion(_quatA).normalize();
+      _normLookAt
+        .copy(this.playerPos)
+        .addScaledVector(_forward, 26)
+        .addScaledVector(_normCamUp, 1.4 - this.landingLegExtend * 0.8);
     } else {
-      this.playerRig.riderBodyGroup.visible = false;
-      this.playerRig.riderCameraAnchor.getWorldPosition(_camTargetPos);
-      _camTargetPos.x += Math.sin(elapsed * 43) * shakeAmp;
-      _camTargetPos.y += Math.sin(this.wingPhase) * 0.07 + Math.cos(elapsed * 37) * shakeAmp;
-      this.camera.position.copy(_camTargetPos);
+      this.playerRig.riderBodyGroup.visible = this.cinematicBlend > 0.12;
+      this.playerRig.riderCameraAnchor.getWorldPosition(_normCamPos);
+      _normCamPos.x += Math.sin(elapsed * 43) * shakeAmp;
+      _normCamPos.y += Math.sin(this.wingPhase) * 0.07 + Math.cos(elapsed * 37) * shakeAmp;
+      _normLookAt.copy(_normCamPos).addScaledVector(_forward, 45);
+      _normCamUp.set(0, 1, 0).applyQuaternion(_finalQuat);
+    }
 
-      _camLookAt.copy(_camTargetPos).addScaledVector(_forward, 45);
-      _up.set(0, 1, 0).applyQuaternion(_finalQuat);
-      this.dampCameraUp(_up, 10, dt);
+    const cineSmooth = THREE.MathUtils.smoothstep(this.cinematicBlend, 0, 1);
+    if (cineSmooth > 0.004 && this.cinematicLandmark) {
+      const lm = this.cinematicLandmark;
+      _cineToLm.set(lm.x - this.playerPos.x, 0, lm.z - this.playerPos.z);
+      if (_cineToLm.lengthSq() < 1) {
+        _cineToLm.copy(_forward).setY(0);
+      }
+      if (_cineToLm.lengthSq() < 0.01) {
+        _cineToLm.set(0, 0, -1);
+      }
+      _cineToLm.normalize();
+      _cineSide.set(-_cineToLm.z, 0, _cineToLm.x).normalize();
+
+      const u = THREE.MathUtils.clamp(this.cinematicTimer / this.cinematicDuration, 0, 1);
+      if (this.cinematicShotStyle === 0) {
+        // Grand Side-Sweep Orbit framing dragon + landmark backdrop
+        const sweep = -0.62 + u * 1.24;
+        const cosS = Math.cos(sweep);
+        const sinS = Math.sin(sweep);
+        const radius = 30.5;
+        _cineCamPos
+          .copy(this.playerPos)
+          .addScaledVector(_cineToLm, -cosS * radius)
+          .addScaledVector(_cineSide, sinS * radius);
+        _cineCamPos.y += 7.5 + Math.sin(u * Math.PI) * 3.8;
+      } else if (this.cinematicShotStyle === 1) {
+        // Low Heroic Tracking Angle sweeping from front-flank
+        _cineCamPos
+          .copy(this.playerPos)
+          .addScaledVector(_forward, 13.5 - u * 10.5)
+          .addScaledVector(_cineSide, 23.5 + u * 4.5);
+        _cineCamPos.y += -2.0 + u * 4.5;
+      } else {
+        // High Crane Panorama slowly gliding over dragon & landmark
+        _cineCamPos
+          .copy(this.playerPos)
+          .addScaledVector(_cineToLm, -24.0 + u * 8.0)
+          .addScaledVector(_cineSide, -22.0 + u * 14.0);
+        _cineCamPos.y += 14.5 + u * 5.5;
+      }
+
+      const cineGnd = getTerrainHeight(_cineCamPos.x, _cineCamPos.z);
+      _cineCamPos.y = Math.max(_cineCamPos.y, Math.max(6.5, cineGnd + 6.5));
+
+      _cineLookAt
+        .copy(this.playerPos)
+        .addScaledVector(_cineToLm, 14)
+        .addScaledVector(_unitY, THREE.MathUtils.clamp((lm.y - this.playerPos.y) * 0.22, -8, 10));
+
+      _camTargetPos.copy(_normCamPos).lerp(_cineCamPos, cineSmooth);
+      _camLookAt.copy(_normLookAt).lerp(_cineLookAt, cineSmooth);
+      _up.copy(_normCamUp).lerp(_unitY, cineSmooth).normalize();
+
+      this.camera.position.lerp(_camTargetPos, 1 - Math.exp(-8.5 * dt));
+      this.dampCameraUp(_up, 7.5, dt);
       this.camera.lookAt(_camLookAt);
+    } else if (this.cameraView === 'full') {
+      this.camera.position.lerp(_normCamPos, 1 - Math.exp(-10.5 * dt));
+      this.dampCameraUp(_normCamUp, 6.5, dt);
+      this.camera.lookAt(_normLookAt);
+    } else {
+      this.camera.position.copy(_normCamPos);
+      this.dampCameraUp(_normCamUp, 10, dt);
+      this.camera.lookAt(_normLookAt);
     }
 
     const targetFov = THREE.MathUtils.clamp(
-      64 + (this.playerSpeed - 45) * 0.36 + this.diveTuckFactor * 6,
-      62,
+      64 + (this.playerSpeed - 45) * 0.36 + this.diveTuckFactor * 6 - cineSmooth * 7.5,
+      56,
       92,
     );
     this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 5, dt);
@@ -4074,6 +4995,64 @@ export class DragonEngine {
           0.8,
         );
       }
+    }
+
+    this.windWingTrailTimer -= dt;
+    if (this.windCurrentIntensity > 0.22 && this.windWingTrailTimer <= 0) {
+      this.windWingTrailTimer = 0.042;
+      this.spawnElemParticle(
+        _v1.x,
+        _v1.y,
+        _v1.z,
+        -_forward.x * 16 + (Math.random() - 0.5) * 2.5,
+        (Math.random() - 0.5) * 2.5,
+        -_forward.z * 16 + (Math.random() - 0.5) * 2.5,
+        0xffffff,
+        0x7dd3fc,
+        0.34,
+        0.22,
+        0.04,
+        0,
+        1.2,
+        1,
+      );
+      this.spawnElemParticle(
+        _v2.x,
+        _v2.y,
+        _v2.z,
+        -_forward.x * 16 + (Math.random() - 0.5) * 2.5,
+        (Math.random() - 0.5) * 2.5,
+        -_forward.z * 16 + (Math.random() - 0.5) * 2.5,
+        0xffffff,
+        0x7dd3fc,
+        0.34,
+        0.22,
+        0.04,
+        0,
+        1.2,
+        1,
+      );
+    }
+
+    if (isSkimmingWater) {
+      this.waterSkimTipTimer += dt;
+      if (this.waterSkimTipTimer >= 0.35) {
+        this.waterSkimTipTimer = 0;
+        this.presentFlightTip({
+          id: 'maneuver_water_skim',
+          category: 'maneuver',
+          titleAr: 'التحليق الملاصق لسطح البحر',
+          mechanicTagAr: 'تأثير الأرض · دوامات + شحن الرابطة',
+          bodyAr: 'الطيران على علو منخفض فوق الأمواج يصنع دوامات مائية خلف جناحيك ويشحن الرابطة الروحية بسرعة.',
+        });
+      }
+    } else {
+      this.waterSkimTipTimer = 0;
+    }
+
+    if (!this.fusionActive) {
+      if (isSkimmingWater) this.addSpiritualBond(10 * dt, false);
+      if (isSlicingCloud) this.addSpiritualBond(9 * dt, false);
     }
 
     const distSanctuary = this.playerPos.distanceTo(this.world.sanctuaryDragonPerch);
@@ -4936,8 +5915,8 @@ export class DragonEngine {
   private fireElementalBreath(): void {
     const isRock = this.activeElement === 'rock';
     const isIce = this.activeElement === 'ice';
-    const cost = isRock ? 14 : isIce ? 1.8 : 1.6;
-    const rate = isRock ? 0.44 : isIce ? 0.032 : 0.028;
+    const cost = this.fusionActive ? 0 : isRock ? 14 : isIce ? 1.8 : 1.6;
+    const rate = (isRock ? 0.44 : isIce ? 0.032 : 0.028) * (this.fusionActive ? 0.72 : 1);
     if (this.fireCooldown > 0 || this.energy < cost) return;
 
     this.fireCooldown = rate;
@@ -4951,8 +5930,8 @@ export class DragonEngine {
     _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
     _up.set(0, 1, 0).applyQuaternion(this.flightQuat).normalize();
 
-    const breathMul = 1 + this.progression.dragonUpgrades.breath * 0.24;
-    const breathRangeBonus = this.progression.dragonUpgrades.breath * 6;
+    const breathMul = (1 + this.progression.dragonUpgrades.breath * 0.24) * (this.fusionActive ? 1.65 : 1);
+    const breathRangeBonus = this.progression.dragonUpgrades.breath * 6 + (this.fusionActive ? 18 : 0);
 
     if (this.activeElement === 'fire') {
       // Continuous Scorching Dragon Flame Stream (overlapping additive plasma + fire cloud)
@@ -5206,6 +6185,7 @@ export class DragonEngine {
         _quatA.setFromEuler(_eulerA);
         ai.rig.root.position.copy(ai.pos);
         ai.rig.root.quaternion.copy(_quatA);
+        ai.rig.setDamageScars(1.0, elapsed);
 
         const limpFlap = Math.sin(elapsed * 14 + ai.patrolSeed) * 0.2;
         ai.rig.leftWingInner.rotation.z = -0.35 + limpFlap;
@@ -5309,6 +6289,7 @@ export class DragonEngine {
             ai.frozenTimer = 0;
             ai.burnTimer = 0;
             ai.rig.setFrozen(false);
+            ai.rig.setDamageScars(0, elapsed);
             ai.rig.riderBodyGroup.visible = true;
             ai.pos.set(
               (Math.random() - 0.5) * 1200,
@@ -5402,6 +6383,10 @@ export class DragonEngine {
         }
       }
 
+      const aiHpRatio = ai.hp / Math.max(1, ai.maxHp);
+      const aiScarSev = aiHpRatio < 0.82 ? THREE.MathUtils.clamp((0.82 - aiHpRatio) / 0.7, 0, 1) : 0;
+      ai.rig.setDamageScars(aiScarSev, elapsed);
+
       // When frozen by the white frost wind, enemy stops moving & attacking in mid-air!
       if (ai.frozenTimer > 0) {
         ai.rig.root.position.set(
@@ -5449,11 +6434,12 @@ export class DragonEngine {
       }
 
       if (!targetPos) {
-        const angle = elapsed * 0.14 + ai.patrolSeed;
+        const angle = elapsed * 0.11 + ai.patrolSeed;
+        const orbitR = 920 + ((ai.patrolSeed * 190) % 1350);
         _v3.set(
-          Math.cos(angle) * 680,
-          95 + Math.sin(elapsed * 0.4 + ai.patrolSeed) * 32,
-          Math.sin(angle * 0.85) * 680,
+          Math.cos(angle) * orbitR,
+          105 + Math.sin(elapsed * 0.4 + ai.patrolSeed) * 38,
+          Math.sin(angle * 0.85) * orbitR,
         );
         targetPos = _v3;
       }
@@ -6974,7 +7960,14 @@ export class DragonEngine {
     let bestScore = 1;
     for (const lm of WORLD_LANDMARKS) {
       const zoneRadius =
-        lm.id === 'volcanic_archipelago' || lm.id === 'enchanted_forest' ? 320 : 185;
+        lm.id === 'eastern_sky_spires' ||
+        lm.id === 'southern_coral_atoll' ||
+        lm.id === 'northern_glacier_crown' ||
+        lm.id === 'western_storm_isles'
+          ? 480
+          : lm.id === 'volcanic_archipelago' || lm.id === 'enchanted_forest'
+            ? 340
+            : 185;
       const d = Math.hypot(this.playerPos.x - lm.x, this.playerPos.z - lm.z);
       const norm = d / zoneRadius;
       if (norm < bestScore) {
@@ -7039,6 +8032,194 @@ export class DragonEngine {
         ? this.riderPos.y
         : this.playerPos.y;
 
+    // Heading-up Mini-map radar projection (zero-GC using scratch _forward vector)
+    const refPos =
+      this.phase === 'skydiving' || this.phase === 'on_foot'
+        ? this.riderPos
+        : this.playerPos;
+    if (this.phase === 'skydiving' || this.phase === 'on_foot') {
+      _forward.set(-Math.sin(this.riderYaw), 0, -Math.cos(this.riderYaw));
+    } else {
+      _forward.set(0, 0, -1).applyQuaternion(this.flightQuat);
+      _forward.y = 0;
+    }
+    if (_forward.lengthSq() < 1e-4) {
+      _forward.set(0, 0, -1);
+    } else {
+      _forward.normalize();
+    }
+    const fx = _forward.x;
+    const fz = _forward.z;
+    const rx = -fz;
+    const rz = fx;
+    const playerHeadingDeg = Math.round(((Math.atan2(fx, -fz) * 180) / Math.PI + 360) % 360);
+
+    const RADAR_RANGE = 1350;
+    const MAX_RADAR_RADIUS = 0.92;
+    const toRadar = (wx: number, wz: number) => {
+      const dx = wx - refPos.x;
+      const dz = wz - refPos.z;
+      const dist = Math.hypot(dx, dz);
+      const fwdDot = dx * fx + dz * fz;
+      const rightDot = dx * rx + dz * rz;
+      let relX = rightDot / RADAR_RANGE;
+      let relY = fwdDot / RADAR_RANGE;
+      const mag = Math.hypot(relX, relY);
+      let clamped = false;
+      if (mag > MAX_RADAR_RADIUS && mag > 1e-5) {
+        const s = MAX_RADAR_RADIUS / mag;
+        relX *= s;
+        relY *= s;
+        clamped = true;
+      }
+      return {
+        relX: Number(relX.toFixed(3)),
+        relY: Number(relY.toFixed(3)),
+        distance: Math.round(dist),
+        clamped,
+      };
+    };
+
+    const minimapBlips: MinimapBlip[] = [];
+
+    // 1. Sanctuary Home Beacon
+    {
+      const r = toRadar(
+        this.world.sanctuaryDragonPerch.x,
+        this.world.sanctuaryDragonPerch.z,
+      );
+      minimapBlips.push({
+        id: 'sanctuary',
+        kind: 'sanctuary',
+        relX: r.relX,
+        relY: r.relY,
+        distance: r.distance,
+        clamped: r.clamped,
+        threat: 'low',
+        labelAr: 'الملاذ',
+      });
+    }
+
+    // 2. Nearby Major Landmarks / Exploration Missions (within 2200m, or closest 1)
+    let closestLm: (typeof WORLD_LANDMARKS)[number] | null = null;
+    let closestLmDist = Infinity;
+    let nearbyLmCount = 0;
+    for (const lm of WORLD_LANDMARKS) {
+      if (lm.id === 'sanctuary') continue;
+      if (lm.id === 'pirates' && this.mode === 'combat' && this.warType === 'dragons') continue;
+      const d = Math.hypot(lm.x - refPos.x, lm.z - refPos.z);
+      if (d < closestLmDist) {
+        closestLmDist = d;
+        closestLm = lm;
+      }
+      if (d <= 2200 && nearbyLmCount < 3) {
+        const r = toRadar(lm.x, lm.z);
+        minimapBlips.push({
+          id: `lm_${lm.id}`,
+          kind: 'mission_landmark',
+          relX: r.relX,
+          relY: r.relY,
+          distance: r.distance,
+          clamped: r.clamped,
+          threat: 'low',
+          labelAr: lm.nameAr,
+        });
+        nearbyLmCount++;
+      }
+    }
+    if (nearbyLmCount === 0 && closestLm) {
+      const r = toRadar(closestLm.x, closestLm.z);
+      minimapBlips.push({
+        id: `lm_${closestLm.id}`,
+        kind: 'mission_landmark',
+        relX: r.relX,
+        relY: r.relY,
+        distance: r.distance,
+        clamped: r.clamped,
+        threat: 'low',
+        labelAr: closestLm.nameAr,
+      });
+    }
+
+    // 3. Active Pirate Ship Targets (when ship war mission is active)
+    if (
+      this.mode === 'combat' &&
+      (this.warType === 'ships' || this.warType === 'both')
+    ) {
+      for (let i = 0; i < this.world.pirateShips.length; i++) {
+        const ship = this.world.pirateShips[i];
+        if (ship.destroyed) continue;
+        const r = toRadar(ship.group.position.x, ship.group.position.z);
+        const shipThreat: ThreatLevel =
+          r.distance <= 210
+            ? 'critical'
+            : r.distance <= 440
+              ? 'high'
+              : r.distance <= 740
+                ? 'medium'
+                : 'low';
+        minimapBlips.push({
+          id: `ship_${i}`,
+          kind: 'pirate_ship',
+          relX: r.relX,
+          relY: r.relY,
+          distance: r.distance,
+          clamped: r.clamped,
+          threat: shipThreat,
+          labelAr: 'سفينة قراصنة',
+        });
+      }
+    }
+
+    // 4. Other Dragons (Allies & Enemies with Proximity + Health/Freeze Threat Grading)
+    for (const ai of this.aiDragons) {
+      if (!ai.alive || !ai.rig.root.visible) continue;
+      const r = toRadar(ai.pos.x, ai.pos.z);
+      if (ai.team === 'ally') {
+        minimapBlips.push({
+          id: ai.id,
+          kind: 'ally_dragon',
+          relX: r.relX,
+          relY: r.relY,
+          distance: r.distance,
+          clamped: r.clamped,
+          threat: 'low',
+          labelAr: ai.nameAr,
+        });
+      } else {
+        const hpRatio = ai.maxHp > 0 ? ai.hp / ai.maxHp : 1;
+        let threat: ThreatLevel;
+        if (r.distance <= 165 || (r.distance <= 260 && hpRatio >= 0.55)) {
+          threat = 'critical';
+        } else if (r.distance <= 360 || (r.distance <= 450 && hpRatio >= 0.7)) {
+          threat = 'high';
+        } else if (r.distance <= 620) {
+          threat = 'medium';
+        } else {
+          threat = 'low';
+        }
+        // Frozen or heavily crippled enemies drop one threat tier unless point-blank
+        if ((ai.frozenTimer > 0.25 || hpRatio <= 0.22) && r.distance > 110) {
+          threat =
+            threat === 'critical'
+              ? 'high'
+              : threat === 'high'
+                ? 'medium'
+                : 'low';
+        }
+        minimapBlips.push({
+          id: ai.id,
+          kind: 'enemy_dragon',
+          relX: r.relX,
+          relY: r.relY,
+          distance: r.distance,
+          clamped: r.clamped,
+          threat,
+          labelAr: ai.nameAr,
+        });
+      }
+    }
+
     this.onHudUpdate({
       phase: this.phase,
       mode: this.mode,
@@ -7065,7 +8246,10 @@ export class DragonEngine {
       alliesAlive,
       enemiesAlive,
       indicators,
+      minimapBlips,
+      playerHeadingDeg,
       toastMessage: this.toastMessage,
+      activeFlightTip: this.activeFlightTip,
       woundsCount: this.woundsCount,
       pointerLocked: this.pointerLocked,
       weather: this.currentWeather,
@@ -7105,6 +8289,19 @@ export class DragonEngine {
       activeLoreSegment: this.activeLoreSegment,
       isLorePlaying: this.isLorePlaying,
       knightSpeechText: this.knightSpeechText,
+      spiritualBond: Math.round(this.spiritualBond),
+      fusionActive: this.fusionActive,
+      fusionTimeLeft: Number(this.fusionTimeLeft.toFixed(1)),
+      fusionDuration: this.fusionDuration,
+      inWindCurrent:
+        this.phase === 'flying' &&
+        (this.windCurrentIntensity > 0.18 || this.windCurrentBoostTimer > 0.25),
+      windCurrentIntensity:
+        this.phase === 'flying' ? Number(this.windCurrentIntensity.toFixed(2)) : 0,
+      autoCinematicEnabled: this.autoCinematicEnabled,
+      cinematicActive: this.phase === 'flying' && this.cinematicBlend > 0.18,
+      cinematicLandmarkNameAr: this.cinematicLandmark?.nameAr ?? null,
+      cinematicLandmarkSubtitleAr: this.cinematicLandmark?.subtitleAr ?? null,
     });
   }
 

@@ -10,11 +10,25 @@ import {
 } from './textures';
 
 export interface CloudCluster {
+  baseCenter: THREE.Vector3;
   center: THREE.Vector3;
   radius: number;
   baseY: number;
   driftPhase: number;
   isVolcanic?: boolean;
+}
+
+export const MAX_CLOUD_SHADOWS = 20;
+export const CLOUD_WRAP_HALF = 4800;
+export const CLOUD_WRAP_SPAN = CLOUD_WRAP_HALF * 2;
+
+export interface CloudShadowUniforms {
+  uTime: { value: number };
+  uSunDir: { value: THREE.Vector3 };
+  uWindOffset: { value: THREE.Vector2 };
+  uStormFactor: { value: number };
+  uCloudShadows: { value: THREE.Vector4[] };
+  uCloudShadowMeta: { value: THREE.Vector4[] };
 }
 
 export interface NarrowRockPillar {
@@ -80,14 +94,27 @@ export interface HangingRoostSpot {
   yaw: number;
 }
 
+export interface WindCurrentStream {
+  id: number;
+  points: THREE.Vector3[];
+  tangents: THREE.Vector3[];
+  radius: number;
+  strength: number;
+  kind: 'jetstream' | 'thermal' | 'canyon_draft';
+}
+
 export interface WorldBuildResult {
   skyMaterial: THREE.ShaderMaterial;
   cloudMaterial: THREE.ShaderMaterial;
+  cloudShadowUniforms: CloudShadowUniforms;
   oceanMesh: THREE.Mesh;
   oceanMaterial: THREE.MeshPhysicalMaterial;
   oceanCubeCamera: THREE.CubeCamera;
   oceanRenderTarget: THREE.WebGLCubeRenderTarget;
   cloudClusters: CloudCluster[];
+  windCurrents: WindCurrentStream[];
+  windRibbonMaterial: THREE.ShaderMaterial;
+  windStreakMaterial: THREE.ShaderMaterial;
   narrowPillars: NarrowRockPillar[];
   pirateShips: PirateShipActor[];
   destructibleBuildings: DestructibleBuilding[];
@@ -114,8 +141,8 @@ export interface WorldBuildResult {
 }
 
 const _zeroMat = new THREE.Matrix4().makeScale(0, 0, 0);
-const TERRAIN_SIZE = 5600;
-const TERRAIN_SEGS = 280;
+const TERRAIN_SIZE = 10400;
+const TERRAIN_SEGS = 340;
 const TERRAIN_STRIDE = TERRAIN_SEGS + 1;
 const TERRAIN_HALF = TERRAIN_SIZE * 0.5;
 const TERRAIN_CELL = TERRAIN_SIZE / TERRAIN_SEGS;
@@ -303,7 +330,7 @@ function baseTerrainHeight(x: number, z: number): number {
     h = Math.max(h, fH);
   }
 
-  // 11. Scattered Sea Stacks & Outer Reef Islands across the expanded 5600m ocean
+  // 11. Scattered Sea Stacks & Outer Reef Islands across the expanded 10400m ocean
   h = Math.max(h, radialHill(x, z, -140, -240, 44, 58) - 5);
   h = Math.max(h, radialHill(x, z, 280, -140, 38, 48) - 5);
   h = Math.max(h, radialHill(x, z, -210, 310, 42, 44) - 5);
@@ -316,6 +343,93 @@ function baseTerrainHeight(x: number, z: number): number {
   h = Math.max(h, radialHill(x, z, -1180, 960, 64, 58) - 6);
   h = Math.max(h, radialHill(x, z, 1480, 1180, 105, 82) - 6);
   h = Math.max(h, radialHill(x, z, 1420, -1280, 95, 92) - 6);
+
+  // 12. Eastern Sky Spires (Far Northeast: 2950, -2350) & flanking ridge
+  const skySpireDist = Math.hypot(x - 2950, z + 2350);
+  if (skySpireDist < 540) {
+    const t = Math.max(0, 1 - skySpireDist / 540);
+    const jag =
+      Math.abs(Math.sin(x * 0.032) * Math.cos(z * 0.032)) * 52 * t +
+      Math.sin(x * 0.075 + z * 0.06) * 14 * t;
+    const peak = Math.pow(t, 1.25) * 188 + jag;
+    h = Math.max(h, peak - 8);
+  }
+  const eastFlankDist = Math.hypot(x - 3360, z + 2040);
+  if (eastFlankDist < 290) {
+    const t = Math.max(0, 1 - eastFlankDist / 290);
+    h = Math.max(
+      h,
+      Math.pow(t, 1.2) * 124 + Math.abs(Math.sin(x * 0.045) * Math.cos(z * 0.045)) * 28 * t - 6,
+    );
+  }
+
+  // 13. Southern Coral Atoll & Tropical Lagoon (Far Southeast: 2450, 2780)
+  const atollCoralDist = Math.hypot(x - 2450, z - 2780);
+  if (atollCoralDist < 580) {
+    const t = Math.max(0, 1 - atollCoralDist / 580);
+    const dune = Math.sin(x * 0.021) * Math.cos(z * 0.021) * 7;
+    let coralH = -4 + Math.pow(t, 0.92) * 44 + dune * t;
+    if (atollCoralDist < 225) {
+      const ang = Math.atan2(z - 2780, x - 2450);
+      const mouthMask = THREE.MathUtils.smoothstep(Math.abs(ang + 2.2), 0.3, 0.95);
+      coralH -= (1 - atollCoralDist / 225) * (36 - mouthMask * 6);
+    }
+    h = Math.max(h, coralH);
+  }
+  const southShoalDist = Math.hypot(x - 2890, z - 2490);
+  if (southShoalDist < 240) {
+    const t = Math.max(0, 1 - southShoalDist / 240);
+    h = Math.max(h, -4 + Math.pow(t, 1.05) * 32 + Math.sin(x * 0.03) * 4 * t);
+  }
+
+  // 14. Northern Glacier Crown (Far North: -360, -3350)
+  const glacierDist = Math.hypot(x + 360, z + 3350);
+  if (glacierDist < 620) {
+    const t = Math.max(0, 1 - glacierDist / 620);
+    const crags =
+      Math.abs(Math.sin(x * 0.034) * Math.cos(z * 0.034)) * 54 * t +
+      Math.sin(x * 0.08 + z * 0.07) * 16 * t;
+    h = Math.max(h, Math.pow(t, 1.28) * 195 + crags - 8);
+  }
+  const glacierWestDist = Math.hypot(x + 860, z + 3120);
+  if (glacierWestDist < 310) {
+    const t = Math.max(0, 1 - glacierWestDist / 310);
+    h = Math.max(
+      h,
+      Math.pow(t, 1.3) * 136 + Math.abs(Math.sin(x * 0.05) * Math.cos(z * 0.05)) * 28 * t - 7,
+    );
+  }
+
+  // 15. Western Storm Isles (Far West: -3250, 260)
+  const stormIsleDist = Math.hypot(x + 3250, z - 260);
+  if (stormIsleDist < 520) {
+    const t = Math.max(0, 1 - stormIsleDist / 520);
+    const crag =
+      Math.pow(t, 1.22) * 158 +
+      Math.sin(x * 0.042) * Math.cos(z * 0.042) * 24 * t +
+      Math.abs(Math.sin(x * 0.085)) * 18 * t;
+    h = Math.max(h, crag - 7);
+  }
+  const stormOutcropDist = Math.hypot(x + 3640, z + 140);
+  if (stormOutcropDist < 260) {
+    const t = Math.max(0, 1 - stormOutcropDist / 260);
+    h = Math.max(h, Math.pow(t, 1.25) * 112 + Math.sin(x * 0.06) * 14 * t - 6);
+  }
+
+  // 16. Distant Open-Ocean Reefs & Basalt Sea Stacks (1900m - 4300m)
+  h = Math.max(h, radialHill(x, z, 2150, -680, 115, 96) - 6);
+  h = Math.max(h, radialHill(x, z, 2080, 1280, 128, 84) - 6);
+  h = Math.max(h, radialHill(x, z, 860, 2240, 136, 78) - 6);
+  h = Math.max(h, radialHill(x, z, -740, 2320, 145, 92) - 6);
+  h = Math.max(h, radialHill(x, z, -2420, 2240, 155, 118) - 6);
+  h = Math.max(h, radialHill(x, z, -2680, -1980, 150, 126) - 6);
+  h = Math.max(h, radialHill(x, z, 1520, -2580, 130, 112) - 6);
+  h = Math.max(h, radialHill(x, z, 3780, 420, 165, 128) - 6);
+  h = Math.max(h, radialHill(x, z, 120, 3850, 180, 108) - 6);
+  h = Math.max(h, radialHill(x, z, -2950, -3100, 175, 142) - 6);
+  h = Math.max(h, radialHill(x, z, 3880, -3420, 160, 136) - 6);
+  h = Math.max(h, radialHill(x, z, 3620, 3550, 155, 94) - 6);
+  h = Math.max(h, radialHill(x, z, -3650, 2650, 168, 124) - 6);
 
   return h;
 }
@@ -1247,10 +1361,96 @@ export function buildDragonWorld(
   const sailTex = createPirateSailTexture(maxAnisotropy);
   const waterNormal = createWaterNormalMap(maxAnisotropy);
   const terrainNormal = createTerrainNormalMap(maxAnisotropy);
-  disposables.push(stoneTex, woodTex, sailTex, waterNormal, terrainNormal);
+  const cloudTex = createVolumetricCloudTexture(maxAnisotropy);
+  disposables.push(stoneTex, woodTex, sailTex, waterNormal, terrainNormal, cloudTex);
 
-  // 1. UE5 Atmospheric Sky Dome (wide 8200m radius for ultra-high altitude soaring)
-  const skyGeo = new THREE.SphereGeometry(8200, 44, 28);
+  // Shared Dynamic Sun-Projected Cloud Shadow Uniforms (synced every frame across Terrain, Ocean & Sky!)
+  const cloudShadowSlots = Array.from(
+    { length: MAX_CLOUD_SHADOWS },
+    () => new THREE.Vector4(0, -9999, 0, 1),
+  );
+  const cloudShadowMeta = Array.from(
+    { length: MAX_CLOUD_SHADOWS },
+    () => new THREE.Vector4(0, 0, 0, 0),
+  );
+  const cloudShadowUniforms: CloudShadowUniforms = {
+    uTime: { value: 0 },
+    uSunDir: { value: new THREE.Vector3(0.62, 0.32, -0.72).normalize() },
+    uWindOffset: { value: new THREE.Vector2(0, 0) },
+    uStormFactor: { value: 0 },
+    uCloudShadows: { value: cloudShadowSlots },
+    uCloudShadowMeta: { value: cloudShadowMeta },
+  };
+
+  const cloudShadowShaderPars = `
+uniform sampler2D uCloudTex;
+uniform float uTime;
+uniform vec3 uSunDir;
+uniform vec2 uWindOffset;
+uniform float uStormFactor;
+uniform vec4 uCloudShadows[${MAX_CLOUD_SHADOWS}];
+uniform vec4 uCloudShadowMeta[${MAX_CLOUD_SHADOWS}];
+varying vec3 vWorldPos;
+
+float evalCloudShadow(vec3 worldPos) {
+  vec3 sunN = normalize(uSunDir);
+  float sunY = max(0.22, sunN.y);
+  vec2 raySlope = sunN.xz / sunY;
+
+  // 1. Explicit 3D sun-ray projected shadows from the nearest large cumulus/anvil/volcanic clouds
+  float explicitShadow = 0.0;
+  for (int i = 0; i < ${MAX_CLOUD_SHADOWS}; i++) {
+    vec4 cs = uCloudShadows[i];
+    if (cs.y < -500.0) continue;
+    float heightAbove = max(0.0, cs.y - worldPos.y);
+    if (heightAbove <= 1.0) continue;
+    vec2 hitXZ = worldPos.xz + raySlope * heightAbove;
+    vec2 delta = hitXZ - cs.xz;
+    float r = cs.w * (1.42 + uStormFactor * 0.25);
+    float d2 = dot(delta, delta);
+    if (d2 >= r * r) continue;
+    float distNorm = sqrt(d2) / r;
+
+    vec4 meta = uCloudShadowMeta[i];
+    vec2 puffUv = clamp(
+      delta / (r * 2.0) + 0.5 + vec2(uTime * 0.012, -uTime * 0.010 + meta.x * 0.13),
+      0.02,
+      0.98
+    );
+    float texDens = texture2D(uCloudTex, puffUv).a;
+    float coreSoft = 1.0 - smoothstep(0.14, 0.98, distNorm);
+    float edgeWisp = smoothstep(0.14, 0.68, texDens * 0.88 + coreSoft * 0.52);
+    float dens = clamp(coreSoft * (0.48 + 0.64 * edgeWisp) * meta.z, 0.0, 1.0);
+    explicitShadow = max(explicitShadow, dens);
+  }
+
+  // 2. Vast continuous drifting cloud-deck shadow layer projected along sun rays across the 10.4km map
+  float veilAlt = 260.0;
+  float veilH = max(0.0, veilAlt - worldPos.y);
+  vec2 veilXZ = worldPos.xz + raySlope * veilH;
+  vec2 uvA = (veilXZ - uWindOffset) * 0.00056;
+  vec2 rotXZ = vec2(
+    veilXZ.x * 0.81 - veilXZ.y * 0.58,
+    veilXZ.x * 0.58 + veilXZ.y * 0.81
+  );
+  vec2 uvB = (rotXZ - uWindOffset * 1.28) * 0.00034 + vec2(0.37, 0.71);
+  float nA = texture2D(uCloudTex, uvA).r;
+  float nB = texture2D(uCloudTex, uvB).g;
+  float veilCoverage = nA * 0.62 + nB * 0.38;
+  float veilThresh = mix(0.49, 0.24, uStormFactor);
+  float veilShadow = smoothstep(veilThresh, veilThresh + 0.23, veilCoverage) * mix(0.68, 0.84, uStormFactor);
+
+  float combined = clamp(
+    max(explicitShadow * 0.94, veilShadow * 0.82) + explicitShadow * veilShadow * 0.16,
+    0.0,
+    0.92
+  );
+  return combined * mix(1.0, 0.76, uStormFactor);
+}
+`;
+
+  // 1. UE5 Atmospheric Sky Dome (wide 15500m radius for vast 10400m world & ultra-high altitude soaring)
+  const skyGeo = new THREE.SphereGeometry(15500, 44, 28);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -1341,9 +1541,17 @@ export function buildDragonWorld(
       Math.hypot(x + 1940, z - 920) < 195 ||
       Math.hypot(x + 1280, z - 1480) < 200;
     const nearFrost = Math.hypot(x - 120, z + 940) < 310;
+    const nearGlacierCrown =
+      Math.hypot(x + 360, z + 3350) < 620 || Math.hypot(x + 860, z + 3120) < 310;
+    const nearCoralAtoll =
+      Math.hypot(x - 2450, z - 2780) < 580 || Math.hypot(x - 2890, z - 2490) < 240;
+    const nearEasternSpires =
+      Math.hypot(x - 2950, z + 2350) < 540 || Math.hypot(x - 3360, z + 2040) < 290;
+    const nearWesternStorm =
+      Math.hypot(x + 3250, z - 260) < 520 || Math.hypot(x + 3640, z + 140) < 260;
 
-    if (nearFrost && y > 4) {
-      tmpColor.copy(cDarkRock).lerp(cSnow, Math.min(1, 0.35 + y / 85));
+    if ((nearFrost || nearGlacierCrown) && y > 3) {
+      tmpColor.copy(cDarkRock).lerp(cSnow, Math.min(1, 0.35 + y / 88));
     } else if (nearHiddenVolc && y > 1) {
       const craterDist = Math.hypot(x + 1520, z + 1500);
       const atollDist = Math.hypot(x + 1230, z + 1780);
@@ -1358,6 +1566,22 @@ export function buildDragonWorld(
         tmpColor.copy(cEnchantedGlade).lerp(cEnchantedFern, gladeDist / 105);
       } else {
         tmpColor.copy(cEnchantedMoss).lerp(cEnchantedFern, Math.min(1, (y - 8) / 42));
+      }
+    } else if (nearWesternStorm && y > 2) {
+      tmpColor.copy(cObsidian).lerp(cRock, Math.min(1, y / 110));
+    } else if (nearCoralAtoll) {
+      if (y < 6.5) {
+        tmpColor.copy(cSand);
+      } else {
+        tmpColor.copy(cSand).lerp(cGrass, Math.min(1, (y - 6.5) / 14));
+      }
+    } else if (nearEasternSpires && y > 4) {
+      if (y < 42) {
+        tmpColor.copy(cGrass).lerp(cRock, Math.max(0, (y - 10) / 32));
+      } else if (y < 125) {
+        tmpColor.copy(cRock).lerp(cDarkRock, (y - 42) / 83);
+      } else {
+        tmpColor.copy(cDarkRock).lerp(cSnow, Math.min(1, (y - 125) / 40));
       }
     } else if (nearVolcano && y > 8) {
       tmpColor.copy(cLavaRock).lerp(cDarkRock, Math.min(1, y / 120));
@@ -1464,6 +1688,37 @@ export function buildDragonWorld(
     roughness: 0.86,
     metalness: 0.04,
   });
+  terrainMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uCloudTex = { value: cloudTex };
+    shader.uniforms.uTime = cloudShadowUniforms.uTime;
+    shader.uniforms.uSunDir = cloudShadowUniforms.uSunDir;
+    shader.uniforms.uWindOffset = cloudShadowUniforms.uWindOffset;
+    shader.uniforms.uStormFactor = cloudShadowUniforms.uStormFactor;
+    shader.uniforms.uCloudShadows = cloudShadowUniforms.uCloudShadows;
+    shader.uniforms.uCloudShadowMeta = cloudShadowUniforms.uCloudShadowMeta;
+
+    shader.vertexShader = `varying vec3 vWorldPos;\n` + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `
+      #include <begin_vertex>
+      vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+      `,
+    );
+
+    shader.fragmentShader = cloudShadowShaderPars + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <lights_fragment_end>',
+      `
+      #include <lights_fragment_end>
+      float _terrainCloudShadow = evalCloudShadow(vWorldPos);
+      float _terrainSunVis = 1.0 - _terrainCloudShadow * 0.86;
+      reflectedLight.directDiffuse *= _terrainSunVis;
+      reflectedLight.directSpecular *= _terrainSunVis;
+      reflectedLight.indirectDiffuse *= mix(vec3(1.0), vec3(0.76, 0.83, 0.96), _terrainCloudShadow * 0.65);
+      `,
+    );
+  };
   const terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
   terrainMesh.receiveShadow = true;
   terrainMesh.castShadow = true;
@@ -1495,16 +1750,16 @@ export function buildDragonWorld(
   scene.add(volcanicGlow);
   disposables.push(lavaGeo, lavaMat, hiddenLavaPoolGeo, atollLavaPoolGeo);
 
-  // 3. Real Sky-Reflecting Physical Ocean (11600m wide) + CubeCamera Reflection
+  // 3. Real Sky-Reflecting Physical Ocean (22000m wide) + CubeCamera Reflection
   const oceanRenderTarget = new THREE.WebGLCubeRenderTarget(256, {
     generateMipmaps: true,
     minFilter: THREE.LinearMipmapLinearFilter,
   });
-  const oceanCubeCamera = new THREE.CubeCamera(1, 6600, oceanRenderTarget);
+  const oceanCubeCamera = new THREE.CubeCamera(1, 13000, oceanRenderTarget);
   oceanCubeCamera.position.set(0, 18, 0);
   scene.add(oceanCubeCamera);
 
-  const oceanGeo = new THREE.PlaneGeometry(11600, 11600, 180, 180);
+  const oceanGeo = new THREE.PlaneGeometry(22000, 22000, 210, 210);
   oceanGeo.rotateX(-Math.PI / 2);
 
   const oceanMaterial = new THREE.MeshPhysicalMaterial({
@@ -1524,12 +1779,14 @@ export function buildDragonWorld(
 
   oceanMaterial.onBeforeCompile = (shader) => {
     const wakeTrailInit = Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 99, 0));
-    shader.uniforms.uTime = { value: 0 };
-    shader.uniforms.uStormFactor = { value: 0 };
+    shader.uniforms.uTime = cloudShadowUniforms.uTime;
+    shader.uniforms.uStormFactor = cloudShadowUniforms.uStormFactor;
     shader.uniforms.uLightning = { value: 0 };
-    shader.uniforms.uSunDir = {
-      value: new THREE.Vector3(0.62, 0.32, -0.72).normalize(),
-    };
+    shader.uniforms.uSunDir = cloudShadowUniforms.uSunDir;
+    shader.uniforms.uWindOffset = cloudShadowUniforms.uWindOffset;
+    shader.uniforms.uCloudTex = { value: cloudTex };
+    shader.uniforms.uCloudShadows = cloudShadowUniforms.uCloudShadows;
+    shader.uniforms.uCloudShadowMeta = cloudShadowUniforms.uCloudShadowMeta;
     shader.uniforms.uDragonWakePos = { value: new THREE.Vector3(0, 0, 0) };
     shader.uniforms.uDragonWakeDir = { value: new THREE.Vector2(0, -1) };
     shader.uniforms.uWakeTrail = { value: wakeTrailInit };
@@ -1566,14 +1823,11 @@ export function buildDragonWorld(
     );
 
     shader.fragmentShader =
-      `uniform float uTime;
-uniform float uStormFactor;
-uniform float uLightning;
-uniform vec3 uSunDir;
+      cloudShadowShaderPars +
+      `uniform float uLightning;
 uniform vec3 uDragonWakePos;
 uniform vec2 uDragonWakeDir;
 uniform vec4 uWakeTrail[8];
-varying vec3 vWorldPos;
 
 float evalDragonWakeField(vec2 wp, out float foamOut) {
   float h = 0.0;
@@ -1624,7 +1878,8 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
   foamOut = clamp(foamOut, 0.0, 1.0);
   return h;
 }
-` + shader.fragmentShader;
+` +
+      shader.fragmentShader;
 
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <normal_fragment_maps>',
@@ -1664,6 +1919,7 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
       '#include <color_fragment>',
       `
       #include <color_fragment>
+      float _oceanCloudShadow = evalCloudShadow(vWorldPos);
       vec3 viewDirW = normalize(cameraPosition - vWorldPos);
       float fresnel = pow(1.0 - clamp(dot(viewDirW, vec3(0.0, 1.0, 0.0)), 0.0, 1.0), 3.2);
       float crest = sin(vWorldPos.x * 0.04 + uTime * 1.6) * cos(vWorldPos.z * 0.04 - uTime * 1.2);
@@ -1674,12 +1930,27 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
       diffuseColor.rgb = mix(diffuseColor.rgb, skyReflCol, fresnel * 0.62);
       float foamThreshold = mix(0.45, 0.20, uStormFactor);
       diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.46, 0.60, 0.68), smoothstep(foamThreshold, 0.96, crest) * (0.20 + uStormFactor * 0.34));
+      diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.36, 0.50, 0.68), _oceanCloudShadow * 0.72);
       float wakeFoam = 0.0;
       evalDragonWakeField(vWorldPos.xz, wakeFoam);
       if (wakeFoam > 0.01) {
         vec3 wakeFoamCol = mix(vec3(0.32, 0.68, 0.78), vec3(0.84, 0.94, 0.99), smoothstep(0.22, 0.85, wakeFoam));
         diffuseColor.rgb = mix(diffuseColor.rgb, wakeFoamCol, wakeFoam * 0.78);
       }
+      `,
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <lights_fragment_end>',
+      `
+      #include <lights_fragment_end>
+      float _oceanSunVis = 1.0 - _oceanCloudShadow * 0.88;
+      reflectedLight.directDiffuse *= _oceanSunVis;
+      reflectedLight.directSpecular *= mix(1.0, 0.10, _oceanCloudShadow);
+      reflectedLight.indirectSpecular *= mix(vec3(1.0), vec3(0.62, 0.72, 0.86), _oceanCloudShadow * 0.52);
+      #ifdef USE_CLEARCOAT
+        clearcoatSpecularDirect *= mix(1.0, 0.14, _oceanCloudShadow);
+      #endif
       `,
     );
   };
@@ -1749,6 +2020,10 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     { cx: -1380, cz: -1630, yaw: -0.55, baseY: 6 },
     // Enchanted Ancient Forest crystal-monolith fly-through gate
     { cx: -1455, cz: 1345, yaw: 0.42, baseY: 22 },
+    // Far Eastern Sky Spires twin canyon gate
+    { cx: 2950, cz: -2350, yaw: 0.58, baseY: 36 },
+    // Far Western Storm Isles basalt strait
+    { cx: -3250, cz: 260, yaw: -0.45, baseY: 14 },
   ];
   for (const ng of needleGates) {
     const cosY = Math.cos(ng.yaw);
@@ -2233,6 +2508,9 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     { x: -1650, z: 1120, yaw: 0.9 },
     { x: -1525, z: 1290, yaw: -1.1 },
     { x: -1910, z: 915, yaw: 0.4 },
+    { x: 2930, z: -2290, yaw: 0.8 },
+    { x: 3340, z: -2010, yaw: -0.7 },
+    { x: -3210, z: 240, yaw: 1.2 },
   ];
   roostTreeSpecs.forEach((spec) => {
     const ry = getTerrainHeight(spec.x, spec.z);
@@ -2246,7 +2524,7 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     hangingRoostSpots.push({ pos: worldPerch, yaw: spec.yaw });
   });
 
-  // 8. Palm Trees along Golden Beach (720, 560) & Ancient Glowing Trees in Enchanted Forests — Destructible InstancedMeshes
+  // 8. Palm Trees along Golden Beach (720, 560), Southern Coral Atoll (2450, 2780) & Ancient Glowing Trees
   const palmPositions: { x: number; y: number; z: number; scale: number; rot: number }[] = [];
   for (let i = 0; i < 64; i++) {
     const angle = (i / 64) * Math.PI * 2;
@@ -2261,6 +2539,22 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
         z: pz,
         scale: 0.9 + ((i * 13) % 35) / 100,
         rot: i * 1.7,
+      });
+    }
+  }
+  for (let i = 0; i < 56; i++) {
+    const angle = (i / 56) * Math.PI * 2;
+    const dist = 235 + ((i * 53) % 245);
+    const px = 2450 + Math.cos(angle) * dist;
+    const pz = 2780 + Math.sin(angle) * dist;
+    const py = getTerrainHeight(px, pz);
+    if (py > 2.4 && py < 28) {
+      palmPositions.push({
+        x: px,
+        y: py,
+        z: pz,
+        scale: 1.0 + ((i * 17) % 38) / 100,
+        rot: i * 1.9,
       });
     }
   }
@@ -2570,7 +2864,7 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
   scene.add(boulderInst);
   disposables.push(boulderGeo, boulderMat);
 
-  // 9. Pirate Fleet (7 War Galleons with Armed Pirate Crews on Deck!)
+  // 9. Pirate Fleet (11 War Galleons across inner & outer seas!)
   const pirateShips: PirateShipActor[] = [];
   const shipConfigs = [
     { cx: 80, cz: 60, r: 210, speed: 0.045, phase: 0.2 },
@@ -2580,6 +2874,10 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     { cx: -210, cz: -40, r: 165, speed: 0.038, phase: 1.2 },
     { cx: 460, cz: -280, r: 160, speed: 0.04, phase: 4.3 },
     { cx: -320, cz: -310, r: 150, speed: -0.046, phase: 0.9 },
+    { cx: 1680, cz: 1450, r: 240, speed: 0.036, phase: 1.5 },
+    { cx: -2120, cz: -140, r: 220, speed: -0.038, phase: 3.1 },
+    { cx: 1860, cz: -1350, r: 230, speed: 0.035, phase: 4.8 },
+    { cx: -1260, cz: 2180, r: 215, speed: -0.04, phase: 2.6 },
   ];
   shipConfigs.forEach((cfg) => {
     const built = buildPirateShip(woodTex, sailTex, pirateSoldierGeo, warriorMat);
@@ -2609,12 +2907,11 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     });
   });
 
-  // 10. UE5 Volumetric-Lit Soft Atmospheric, High-Altitude & Pyroclastic Volcanic Cloud Banks
+  // 10. UE5 Volumetric-Lit Soft Atmospheric, High-Altitude & Pyroclastic Cloud Banks across 10.4km Open World
   const cloudClusters: CloudCluster[] = [];
-  const cloudTex = createVolumetricCloudTexture(maxAnisotropy);
-  const atmClusterCount = 96;
+  const atmClusterCount = 156;
   const atmPuffsPerCluster = 12;
-  const highClusterCount = 44;
+  const highClusterCount = 72;
   const highPuffsPerCluster = 10;
   const volcanicClusterCount = 32;
   const volcanicPuffsPerCluster = 12;
@@ -2633,20 +2930,22 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
   // Per-instance attributes: [rollAngle, heightNorm(0=belly..1=crown), uvOffset, driftPhase]
   const cloudSeeds = new Float32Array(totalPuffs * 4);
   const puffOffsets = new Float32Array(totalPuffs * 3);
+  const clusterCentersAttr = new Float32Array(totalPuffs * 3);
   const puffScales = new Float32Array(totalPuffs * 2);
   const volcanicFactors = new Float32Array(totalPuffs);
 
   let puffIdx = 0;
-  // Layer A: Low & Mid Towering Cumulus Banks (72m - 215m)
+  // Layer A: Low & Mid Towering Cumulus Banks (74m - 228m) distributed across the 10.4km map
   for (let i = 0; i < atmClusterCount; i++) {
-    const angle = (i / atmClusterCount) * Math.PI * 2 + (i % 5) * 0.37;
-    const dist = 165 + ((i * 197) % 2320);
+    const angle = (i / atmClusterCount) * Math.PI * 2 + (i % 7) * 0.43;
+    const dist = 165 + ((i * 277) % 4450);
     const cx = Math.cos(angle) * dist;
     const cz = Math.sin(angle) * dist;
-    const cy = 74 + ((i * 31) % 138);
-    const clusterRadius = 46 + (i % 4) * 7;
+    const cy = 76 + ((i * 31) % 146);
+    const clusterRadius = 54 + (i % 4) * 11;
 
     cloudClusters.push({
+      baseCenter: new THREE.Vector3(cx, cy, cz),
       center: new THREE.Vector3(cx, cy, cz),
       radius: clusterRadius,
       baseY: cy,
@@ -2664,12 +2963,16 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
       const oz = cz + Math.sin(puffAng) * spreadR * (isCrown ? 0.5 : 1.04);
       const oy = cy + (isCrown ? 8.5 + (p - 8) * 5.2 : ((p % 3) - 1) * 3.4);
 
-      const scaleW = (32 + ((i * 11 + p * 7) % 20)) * (isCrown ? 0.94 : 1.32);
+      const scaleW = (38 + ((i * 11 + p * 7) % 24)) * (isCrown ? 0.96 : 1.38);
       const scaleH = scaleW * (isCrown ? 0.82 : 0.58);
 
       puffOffsets[puffIdx * 3] = ox;
       puffOffsets[puffIdx * 3 + 1] = oy;
       puffOffsets[puffIdx * 3 + 2] = oz;
+
+      clusterCentersAttr[puffIdx * 3] = cx;
+      clusterCentersAttr[puffIdx * 3 + 1] = cy;
+      clusterCentersAttr[puffIdx * 3 + 2] = cz;
 
       puffScales[puffIdx * 2] = scaleW;
       puffScales[puffIdx * 2 + 1] = scaleH;
@@ -2684,17 +2987,18 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     }
   }
 
-  // Layer B: High-Altitude Stratospheric & Anvil Cloud Deck (295m - 640m) for soaring above the world
+  // Layer B: High-Altitude Stratospheric & Anvil Cloud Deck (295m - 650m) across 10.4km skies
   for (let hIdx = 0; hIdx < highClusterCount; hIdx++) {
     const i = atmClusterCount + hIdx;
     const angle = (hIdx / highClusterCount) * Math.PI * 2 + (hIdx % 7) * 0.29;
-    const dist = 120 + ((hIdx * 241) % 2380);
+    const dist = 140 + ((hIdx * 337) % 4480);
     const cx = Math.cos(angle) * dist;
     const cz = Math.sin(angle) * dist;
     const cy = 295 + ((hIdx * 47) % 345);
-    const clusterRadius = 68 + (hIdx % 4) * 12;
+    const clusterRadius = 82 + (hIdx % 4) * 16;
 
     cloudClusters.push({
+      baseCenter: new THREE.Vector3(cx, cy, cz),
       center: new THREE.Vector3(cx, cy, cz),
       radius: clusterRadius,
       baseY: cy,
@@ -2711,12 +3015,16 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
       const oz = cz + Math.sin(puffAng) * spreadR * (isCrown ? 0.55 : 1.12);
       const oy = cy + (isCrown ? 11.0 + (p - 7) * 6.4 : ((p % 3) - 1) * 4.2);
 
-      const scaleW = (52 + ((i * 13 + p * 9) % 28)) * (isCrown ? 0.96 : 1.42);
+      const scaleW = (62 + ((i * 13 + p * 9) % 34)) * (isCrown ? 0.98 : 1.46);
       const scaleH = scaleW * (isCrown ? 0.72 : 0.44);
 
       puffOffsets[puffIdx * 3] = ox;
       puffOffsets[puffIdx * 3 + 1] = oy;
       puffOffsets[puffIdx * 3 + 2] = oz;
+
+      clusterCentersAttr[puffIdx * 3] = cx;
+      clusterCentersAttr[puffIdx * 3 + 1] = cy;
+      clusterCentersAttr[puffIdx * 3 + 2] = cz;
 
       puffScales[puffIdx * 2] = scaleW;
       puffScales[puffIdx * 2 + 1] = scaleH;
@@ -2746,9 +3054,10 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
       const cx = anchor.x + Math.cos(ang) * anchor.spread * ringFrac;
       const cz = anchor.z + Math.sin(ang) * anchor.spread * ringFrac;
       const cy = anchor.baseMinY + ((volcClusterIdx * 23) % anchor.baseRangeY);
-      const clusterRadius = 50 + (volcClusterIdx % 4) * 7;
+      const clusterRadius = 54 + (volcClusterIdx % 4) * 8;
 
       cloudClusters.push({
+        baseCenter: new THREE.Vector3(cx, cy, cz),
         center: new THREE.Vector3(cx, cy, cz),
         radius: clusterRadius,
         baseY: cy,
@@ -2772,6 +3081,10 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
         puffOffsets[puffIdx * 3 + 1] = oy;
         puffOffsets[puffIdx * 3 + 2] = oz;
 
+        clusterCentersAttr[puffIdx * 3] = cx;
+        clusterCentersAttr[puffIdx * 3 + 1] = cy;
+        clusterCentersAttr[puffIdx * 3 + 2] = cz;
+
         puffScales[puffIdx * 2] = scaleW;
         puffScales[puffIdx * 2 + 1] = scaleH;
 
@@ -2790,6 +3103,10 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
   instCloudGeo.setAttribute(
     'aCloudCenter',
     new THREE.InstancedBufferAttribute(puffOffsets, 3),
+  );
+  instCloudGeo.setAttribute(
+    'aClusterCenter',
+    new THREE.InstancedBufferAttribute(clusterCentersAttr, 3),
   );
   instCloudGeo.setAttribute(
     'aCloudSize',
@@ -2812,47 +3129,88 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
     uniforms: {
       uCloudTex: { value: cloudTex },
       uTime: { value: 0 },
-      uSunDir: { value: new THREE.Vector3(0.62, 0.32, -0.72).normalize() },
+      uSunDir: cloudShadowUniforms.uSunDir,
+      uWindOffset: cloudShadowUniforms.uWindOffset,
       uStormFactor: { value: 0 },
       uLightning: { value: 0 },
       uVolcanicLightning: { value: 0 },
+      uPlayerPos: { value: new THREE.Vector3(0, -999, 0) },
+      uPlayerSpeed: { value: 0 },
     },
     vertexShader: `
       attribute vec3 aCloudCenter;
+      attribute vec3 aClusterCenter;
       attribute vec2 aCloudSize;
       attribute vec4 aCloudSeed;
       attribute float aVolcanicFactor;
       uniform float uTime;
       uniform vec3 uSunDir;
+      uniform vec2 uWindOffset;
+      uniform float uStormFactor;
+      uniform vec3 uPlayerPos;
+      uniform float uPlayerSpeed;
       varying vec2 vUv;
       varying vec4 vSeed;
       varying vec3 vWorldPos;
       varying float vViewDist;
       varying float vVolcanic;
       varying vec2 vSunUvDir;
+      varying float vWake;
+      varying float vBorderFade;
 
       void main() {
         vUv = uv;
         vSeed = aCloudSeed;
         vVolcanic = aVolcanicFactor;
 
-        // Atmospheric float + convective volcanic updraft swirl
+        float spinDir = aCloudSeed.z >= 0.5 ? 1.0 : -1.0;
+        float windPace = 1.0 + uStormFactor * 0.95 + aVolcanicFactor * 0.85;
+
+        // Whole-cluster prevailing wind advection wrapped cleanly across ±${CLOUD_WRAP_HALF}m
         vec3 center = aCloudCenter;
-        center.y += sin(uTime * (0.32 + aVolcanicFactor * 0.18) + aCloudSeed.w) * (1.85 + aVolcanicFactor * 2.4);
-        center.x += sin(uTime * (0.04 + aVolcanicFactor * 0.08) + aCloudSeed.z * 6.2831) * (12.0 + aVolcanicFactor * 8.0);
-        center.z += cos(uTime * 0.07 + aCloudSeed.w) * (aVolcanicFactor * 7.0);
+        if (aVolcanicFactor < 0.5) {
+          float wx = mod(aClusterCenter.x + uWindOffset.x + ${CLOUD_WRAP_HALF}.0, ${CLOUD_WRAP_SPAN}.0) - ${CLOUD_WRAP_HALF}.0;
+          float wz = mod(aClusterCenter.z + uWindOffset.y + ${CLOUD_WRAP_HALF}.0, ${CLOUD_WRAP_SPAN}.0) - ${CLOUD_WRAP_HALF}.0;
+          center += vec3(wx - aClusterCenter.x, 0.0, wz - aClusterCenter.z);
+          float edgeDist = max(abs(wx), abs(wz));
+          vBorderFade = 1.0 - smoothstep(${CLOUD_WRAP_HALF - 420}.0, ${CLOUD_WRAP_HALF}.0, edgeDist);
+        } else {
+          vBorderFade = 1.0;
+        }
+
+        // Convective smoke-like vertical rise & horizontal turbulent eddy drift
+        center.y += sin(uTime * 0.42 * windPace + aCloudSeed.w) * (3.2 + aVolcanicFactor * 3.8 + uStormFactor * 2.2)
+                  + cos(uTime * 0.78 + aCloudSeed.z * 12.566) * 1.4;
+        center.x += sin(uTime * 0.085 * windPace + aCloudSeed.z * 6.2831) * (14.0 + aVolcanicFactor * 12.0 + uStormFactor * 10.0)
+                  + cos(uTime * 0.21 + aCloudSeed.w) * 4.5;
+        center.z += cos(uTime * 0.11 * windPace + aCloudSeed.w * 1.3) * (8.0 + aVolcanicFactor * 11.0 + uStormFactor * 7.0);
+
+        // Aerodynamic wake swirl & parting turbulence when the dragon tears through a cloud
+        vec3 fromPlayer = center - uPlayerPos;
+        float pDist = length(fromPlayer);
+        float speedFactor = clamp(uPlayerSpeed / 75.0, 0.2, 1.6);
+        float wake = (1.0 - smoothstep(10.0, 74.0, pDist)) * speedFactor;
+        vec3 wakePushDir = pDist > 0.001 ? fromPlayer / pDist : vec3(0.0, 1.0, 0.0);
+        center += wakePushDir * wake * 11.5;
+        vWake = wake;
 
         // Extract camera right & up vectors directly from viewMatrix for silky billboarding
         vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
         vec3 camUp = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
 
-        float ang = aCloudSeed.x + sin(uTime * (0.08 + aVolcanicFactor * 0.14) + aCloudSeed.z * 6.28) * (0.08 + aVolcanicFactor * 0.1);
+        // Continuous counter-rotating smoke roll + organic convective billowing stretch
+        float swirlAngle = uTime * (0.065 + aVolcanicFactor * 0.085 + uStormFactor * 0.055) * spinDir
+                         + wake * 0.55 * spinDir;
+        float ang = aCloudSeed.x + swirlAngle + sin(uTime * (0.28 + aVolcanicFactor * 0.18) + aCloudSeed.z * 6.2831) * 0.22;
         float c = cos(ang);
         float s = sin(ang);
+        float breatheW = 1.0 + sin(uTime * 0.55 + aCloudSeed.w * 2.1) * 0.085 + wake * 0.22;
+        float breatheH = 1.0 + cos(uTime * 0.68 + aCloudSeed.z * 9.42) * 0.095 + wake * 0.18;
+        vec2 scaledPos = position.xy * aCloudSize * vec2(breatheW, breatheH);
         vec2 rotatedPos = vec2(
-          position.x * c - position.y * s,
-          position.x * s + position.y * c
-        ) * aCloudSize;
+          scaledPos.x * c - scaledPos.y * s,
+          scaledPos.x * s + scaledPos.y * c
+        );
 
         // Project world sun direction into rotated sprite UV space for true volumetric self-shadowing
         vec2 sunScreen = vec2(dot(uSunDir, camRight), dot(uSunDir, camUp));
@@ -2881,32 +3239,48 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
       varying float vViewDist;
       varying float vVolcanic;
       varying vec2 vSunUvDir;
+      varying float vWake;
+      varying float vBorderFade;
 
       void main() {
+        if (vBorderFade < 0.01) discard;
         vec2 centered = vUv - 0.5;
         float r2 = dot(centered, centered) * 4.0;
         if (r2 >= 1.0) discard;
 
-        // Multi-octave animated wispy curl drift + directional self-shadow march toward the Sun
-        vec2 flowUv = vUv + vec2(uTime * (0.008 + vVolcanic * 0.014) + vSeed.z, uTime * 0.004 - vSeed.z * 0.5);
-        vec4 texA = texture2D(uCloudTex, vUv);
-        vec4 texB = texture2D(uCloudTex, flowUv * 1.55);
-        vec4 texSun1 = texture2D(uCloudTex, clamp(vUv + vSunUvDir * 0.055, 0.02, 0.98));
-        vec4 texSun2 = texture2D(uCloudTex, clamp(vUv + vSunUvDir * 0.115, 0.02, 0.98));
+        float spinDir = vSeed.z >= 0.5 ? 1.0 : -1.0;
+        float tempo = 1.0 + uStormFactor * 0.85 + vVolcanic * 0.75 + vWake * 2.3;
 
-        // Eroded wispy silhouette with crisp cauliflower billow core
-        float erodedAlpha = texA.a - (1.0 - texB.g) * mix(0.18, 0.1, vVolcanic) * (1.0 - texA.b);
-        float radialSoft = 1.0 - smoothstep(mix(0.42, 0.32, vVolcanic), 1.0, r2);
-        float densityGain = mix(1.06, 1.54, vVolcanic);
-        float maxOpacity = mix(0.92, 0.98, vVolcanic);
-        float alpha = clamp(erodedAlpha * radialSoft * densityGain, 0.0, maxOpacity);
-        if (alpha < 0.014) discard;
+        // Dual counter-rotating turbulent curl advection for living smoke-like internal motion
+        vec2 driftA = vec2(uTime * 0.032 * tempo * spinDir + vSeed.z, -uTime * 0.048 * tempo - vSeed.w * 0.13);
+        vec2 driftB = vec2(-uTime * 0.026 * tempo * spinDir - vSeed.z * 0.5, -uTime * 0.036 * tempo + vSeed.w * 0.09);
+        vec4 curlA = texture2D(uCloudTex, vUv * 1.35 + driftA);
+        vec4 curlB = texture2D(uCloudTex, vUv * 2.15 + driftB);
 
-        // Beer-Lambert volumetric self-shadowing + Powder edge brightening
+        vec2 curlWarp = (vec2(curlA.g, curlB.g) - 0.5) * (0.145 + uStormFactor * 0.05 + vVolcanic * 0.05 + vWake * 0.11);
+        float ribbonShear = sin(uTime * (0.42 + uStormFactor * 0.35) + vUv.y * 5.2 + vSeed.w) * 0.024 * spinDir;
+        vec2 smokeUv = clamp(vUv + curlWarp + vec2(ribbonShear, -0.012), 0.01, 0.99);
+
+        vec4 texA = texture2D(uCloudTex, smokeUv);
+        vec4 texSun1 = texture2D(uCloudTex, clamp(smokeUv + vSunUvDir * 0.055, 0.02, 0.98));
+        vec4 texSun2 = texture2D(uCloudTex, clamp(smokeUv + vSunUvDir * 0.115, 0.02, 0.98));
+
+        // Wispy smoky edge erosion with curling translucent tendrils
+        float tendrilNoise = mix(curlA.g, curlB.g, 0.52);
+        float ridgeNoise = mix(curlA.r, curlB.r, 0.45);
+        float erodedAlpha = texA.a - (1.0 - tendrilNoise) * mix(0.28, 0.15, vVolcanic) * (1.0 - texA.b * 0.78);
+        float wispyVeil = smoothstep(0.14, 0.74, texA.a * 0.78 + tendrilNoise * 0.34);
+        float radialSoft = 1.0 - smoothstep(mix(0.34, 0.26, vVolcanic), 1.0, r2);
+        float densityGain = mix(1.04, 1.54, vVolcanic);
+        float maxOpacity = mix(0.90, 0.98, vVolcanic);
+        float alpha = clamp(mix(erodedAlpha, erodedAlpha * wispyVeil, 0.55) * radialSoft * densityGain, 0.0, maxOpacity);
+        if (alpha < 0.012) discard;
+
+        // Beer-Lambert volumetric self-shadowing + Powder edge brightening over undulating smoke domes
         float sunOccl = (texSun1.b * 0.6 + texSun2.b * 0.4);
         float beerShadow = exp(-sunOccl * mix(1.65, 2.35, uStormFactor + vVolcanic * 0.4));
         float powder = 1.0 - exp(-texA.b * 2.4);
-        float directSun = clamp(mix(beerShadow, beerShadow * powder * 1.38, 0.55) + (texA.r - texSun1.r) * 0.48, 0.0, 1.35);
+        float directSun = clamp(mix(beerShadow, beerShadow * powder * 1.38, 0.55) + (texA.r - texSun1.r) * 0.52, 0.0, 1.35);
 
         // Dual-lobe Henyey-Greenstein atmospheric sun scattering (forward silver lining + soft warm bounce)
         vec3 viewDir = normalize(vWorldPos - cameraPosition);
@@ -2915,7 +3289,7 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
         float hgFwd = (1.0 - g1 * g1) / (4.0 * 3.14159 * pow(max(0.08, 1.0 + g1 * g1 - 2.0 * g1 * cosTheta), 1.5));
         float silverLining = clamp(hgFwd * 0.36, 0.0, 1.4) * (1.0 - uStormFactor * 0.72) * (1.0 - texA.b * 0.42) * (1.0 - vVolcanic * 0.78);
 
-        float crownShade = clamp(vSeed.y * 0.52 + vUv.y * 0.24 + directSun * 0.42 + texA.r * 0.14, 0.0, 1.0);
+        float crownShade = clamp(vSeed.y * 0.5 + vUv.y * 0.22 + directSun * 0.4 + ridgeNoise * 0.16, 0.0, 1.0);
         vec3 clearTop = vec3(1.0, 0.97, 0.92);
         vec3 clearBelly = vec3(0.44, 0.56, 0.70);
         vec3 stormTop = vec3(0.32, 0.38, 0.45);
@@ -2941,10 +3315,10 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
         col += lightningTint * localFlash * (0.35 + (1.0 - texA.r) * 0.65 + vVolcanic * 0.32);
         col += vec3(1.0, 0.52, 0.18) * uVolcanicLightning * vVolcanic * (1.0 - crownShade) * 0.42;
 
-        // Smooth near-camera soft dissolve & wide high-altitude horizon fade
+        // Smooth near-camera soft dissolve & wide 10.4km horizon fade
         float nearFade = smoothstep(8.0, 34.0, vViewDist);
-        float farFade = 1.0 - smoothstep(4200.0, 7600.0, vViewDist);
-        alpha *= nearFade * farFade;
+        float farFade = 1.0 - smoothstep(7800.0, 14500.0, vViewDist);
+        alpha *= nearFade * farFade * vBorderFade;
 
         gl_FragColor = vec4(col, alpha);
       }
@@ -2955,16 +3329,614 @@ float evalDragonWakeField(vec2 wp, out float foamOut) {
   cloudInstMesh.frustumCulled = false;
   cloudInstMesh.renderOrder = 2;
   scene.add(cloudInstMesh);
-  disposables.push(cloudTex, instCloudGeo, cloudMat);
+  disposables.push(instCloudGeo, cloudMat);
+
+  // 12. Sky Wind Currents (تيارات هوائية مرئية): sweeping slipstream ribbons & rushing airflow streaks
+  const windCurrentDefs: {
+    waypoints: [number, number, number][];
+    radius: number;
+    strength: number;
+    kind: 'jetstream' | 'thermal' | 'canyon_draft';
+  }[] = [
+    // Launch slipstream outside Sanctuary Cavern heading across the sea
+    {
+      waypoints: [
+        [-470, 82, 430],
+        [-230, 92, 235],
+        [40, 86, 45],
+        [330, 74, -125],
+      ],
+      radius: 32,
+      strength: 1.05,
+      kind: 'canyon_draft',
+    },
+    // Twin Canyon Chasm wind tunnel
+    {
+      waypoints: [
+        [-485, 96, -320],
+        [-480, 108, -560],
+        [-430, 132, -790],
+        [-210, 148, -945],
+      ],
+      radius: 28,
+      strength: 1.12,
+      kind: 'canyon_draft',
+    },
+    // Golden Beach to Coral Palace sea breeze
+    {
+      waypoints: [
+        [520, 56, 420],
+        [690, 68, 130],
+        [780, 74, -220],
+        [650, 84, -520],
+      ],
+      radius: 30,
+      strength: 1.0,
+      kind: 'canyon_draft',
+    },
+    // Mount Volcano soaring thermal updraft
+    {
+      waypoints: [
+        [850, 112, 165],
+        [940, 185, 85],
+        [905, 275, -15],
+        [815, 370, 65],
+      ],
+      radius: 34,
+      strength: 1.18,
+      kind: 'thermal',
+    },
+    // Enchanted Forest glowing canopy draft
+    {
+      waypoints: [
+        [-1410, 84, 1070],
+        [-1600, 98, 1220],
+        [-1480, 125, 1430],
+        [-1210, 144, 1340],
+      ],
+      radius: 30,
+      strength: 1.02,
+      kind: 'canyon_draft',
+    },
+    // Pirate Fleet low-altitude ocean slipstream
+    {
+      waypoints: [
+        [-240, 44, 185],
+        [45, 42, 40],
+        [270, 48, -145],
+        [530, 58, -265],
+      ],
+      radius: 30,
+      strength: 1.04,
+      kind: 'canyon_draft',
+    },
+    // Northern Frostspire alpine tailwind
+    {
+      waypoints: [
+        [-150, 118, -780],
+        [120, 134, -940],
+        [430, 152, -885],
+        [690, 140, -680],
+      ],
+      radius: 31,
+      strength: 1.08,
+      kind: 'jetstream',
+    },
+    // Falcon Castle rampart draft
+    {
+      waypoints: [
+        [-750, 102, 190],
+        [-865, 114, -60],
+        [-785, 128, -320],
+        [-600, 136, -470],
+      ],
+      radius: 29,
+      strength: 1.0,
+      kind: 'canyon_draft',
+    },
+    // Volcanic Archipelago storm thermal
+    {
+      waypoints: [
+        [-1250, 132, -1230],
+        [-1500, 168, -1500],
+        [-1690, 215, -1380],
+        [-1540, 270, -1120],
+      ],
+      radius: 34,
+      strength: 1.16,
+      kind: 'thermal',
+    },
+    // High-altitude Stratospheric Jetstream 1 (West -> East)
+    {
+      waypoints: [
+        [-1150, 240, -240],
+        [-450, 265, -80],
+        [260, 250, 60],
+        [960, 275, 180],
+      ],
+      radius: 35,
+      strength: 1.2,
+      kind: 'jetstream',
+    },
+    // High-altitude Stratospheric Jetstream 2 (South -> North)
+    {
+      waypoints: [
+        [-140, 310, 1040],
+        [-40, 335, 380],
+        [80, 320, -320],
+        [180, 350, -980],
+      ],
+      radius: 35,
+      strength: 1.22,
+      kind: 'jetstream',
+    },
+    // High-altitude Ring Current (NE -> SW above cloud deck)
+    {
+      waypoints: [
+        [980, 390, -760],
+        [460, 420, -1080],
+        [-220, 405, -1040],
+        [-860, 375, -720],
+      ],
+      radius: 36,
+      strength: 1.24,
+      kind: 'jetstream',
+    },
+    // Sanctuary Ascending Skybridge Current (connects Sanctuary ridge up to high clouds)
+    {
+      waypoints: [
+        [-680, 135, 420],
+        [-840, 205, 190],
+        [-780, 275, -140],
+        [-520, 330, -420],
+      ],
+      radius: 32,
+      strength: 1.14,
+      kind: 'jetstream',
+    },
+    // South-East Lagoon to Volcano Climbing Thermal
+    {
+      waypoints: [
+        [680, 72, 680],
+        [860, 118, 490],
+        [945, 165, 250],
+        [910, 225, -40],
+      ],
+      radius: 31,
+      strength: 1.1,
+      kind: 'thermal',
+    },
+    // Deep-Sky Apex Jetstream (460m - 540m soaring expressway)
+    {
+      waypoints: [
+        [-1280, 465, 860],
+        [-540, 505, 460],
+        [220, 520, 40],
+        [920, 480, -380],
+      ],
+      radius: 36,
+      strength: 1.26,
+      kind: 'jetstream',
+    },
+    // Western Archipelago Express Current
+    {
+      waypoints: [
+        [-1380, 195, -960],
+        [-1180, 170, -420],
+        [-1120, 155, 240],
+        [-1320, 168, 860],
+      ],
+      radius: 33,
+      strength: 1.15,
+      kind: 'jetstream',
+    },
+    // Far Northeast Sky Spires Expressway
+    {
+      waypoints: [
+        [1060, 145, -540],
+        [1760, 185, -1240],
+        [2480, 215, -1890],
+        [2980, 235, -2380],
+      ],
+      radius: 38,
+      strength: 1.24,
+      kind: 'jetstream',
+    },
+    // Eastern Sky Spires Climbing Thermal
+    {
+      waypoints: [
+        [2850, 125, -2420],
+        [2960, 215, -2340],
+        [3060, 315, -2220],
+        [2920, 415, -2140],
+      ],
+      radius: 36,
+      strength: 1.22,
+      kind: 'thermal',
+    },
+    // Far Southeast Tropical Coral Trade Wind
+    {
+      waypoints: [
+        [920, 74, 760],
+        [1520, 92, 1540],
+        [2080, 86, 2260],
+        [2520, 78, 2790],
+      ],
+      radius: 36,
+      strength: 1.18,
+      kind: 'canyon_draft',
+    },
+    // Far Northern Glacier Polar Jetstream
+    {
+      waypoints: [
+        [140, 155, -1220],
+        [-40, 195, -1980],
+        [-210, 225, -2680],
+        [-360, 245, -3320],
+      ],
+      radius: 38,
+      strength: 1.25,
+      kind: 'jetstream',
+    },
+    // Far Western Storm Isles Gale
+    {
+      waypoints: [
+        [-1180, 118, -20],
+        [-1880, 138, 120],
+        [-2580, 154, 210],
+        [-3220, 168, 260],
+      ],
+      radius: 37,
+      strength: 1.22,
+      kind: 'jetstream',
+    },
+    // Outer Rim Stratospheric Ring (East -> South)
+    {
+      waypoints: [
+        [3120, 390, -1850],
+        [3240, 420, -280],
+        [3050, 405, 1350],
+        [2520, 370, 2640],
+      ],
+      radius: 40,
+      strength: 1.3,
+      kind: 'jetstream',
+    },
+    // Outer Rim Stratospheric Ring (North -> West)
+    {
+      waypoints: [
+        [-420, 430, -3280],
+        [-1780, 440, -2550],
+        [-2780, 410, -1240],
+        [-3240, 360, 180],
+      ],
+      radius: 40,
+      strength: 1.28,
+      kind: 'jetstream',
+    },
+  ];
+
+  const windCurrents: WindCurrentStream[] = [];
+  const ribbonPositions: number[] = [];
+  const ribbonUvs: number[] = [];
+  const ribbonSeeds: number[] = [];
+  const ribbonKinds: number[] = [];
+  const ribbonIndices: number[] = [];
+
+  const streakCenters: number[] = [];
+  const streakTangents: number[] = [];
+  const streakCorners: number[] = [];
+  const streakSeeds: number[] = [];
+  const streakKinds: number[] = [];
+  const streakIndices: number[] = [];
+
+  const wUpVec = new THREE.Vector3(0, 1, 0);
+  const wAltUpVec = new THREE.Vector3(1, 0, 0);
+  const wRightVec = new THREE.Vector3();
+  const wBinormVec = new THREE.Vector3();
+  const wOffsetVec = new THREE.Vector3();
+  const wWidthVec = new THREE.Vector3();
+
+  const ribbonSegs = 40;
+  const ribbonsPerStream = 3;
+  const streaksPerStream = 26;
+
+  windCurrentDefs.forEach((def, streamIdx) => {
+    const curve = new THREE.CatmullRomCurve3(
+      def.waypoints.map(([x, y, z]) => new THREE.Vector3(x, y, z)),
+      false,
+      'catmullrom',
+      0.5,
+    );
+    const kindCode = def.kind === 'thermal' ? 1 : def.kind === 'canyon_draft' ? 2 : 0;
+
+    // Sample 18 physics segments along each stream for fast runtime detection
+    const sampleCount = 18;
+    const pts: THREE.Vector3[] = [];
+    const tans: THREE.Vector3[] = [];
+    for (let s = 0; s <= sampleCount; s++) {
+      const t = s / sampleCount;
+      pts.push(curve.getPointAt(t));
+      tans.push(curve.getTangentAt(t).normalize());
+    }
+    windCurrents.push({
+      id: streamIdx,
+      points: pts,
+      tangents: tans,
+      radius: def.radius,
+      strength: def.strength,
+      kind: def.kind,
+    });
+
+    // Build 3 intertwined helical translucent wind ribbons per current
+    for (let r = 0; r < ribbonsPerStream; r++) {
+      const baseVertex = ribbonPositions.length / 3;
+      const phaseSeed = (streamIdx * 0.37 + r * 0.333) % 1;
+      const flowSpeed = 0.48 + ((streamIdx + r) % 4) * 0.08;
+
+      for (let s = 0; s <= ribbonSegs; s++) {
+        const u = s / ribbonSegs;
+        const center = curve.getPointAt(u);
+        const tan = curve.getTangentAt(u).normalize();
+        const refUp = Math.abs(tan.y) > 0.9 ? wAltUpVec : wUpVec;
+        wRightVec.crossVectors(tan, refUp).normalize();
+        wBinormVec.crossVectors(wRightVec, tan).normalize();
+
+        const helixAngle = u * Math.PI * 3.8 + (r * Math.PI * 2) / ribbonsPerStream + streamIdx * 0.7;
+        const radialR =
+          def.radius * (0.34 + 0.14 * Math.sin(u * Math.PI * 2.5 + r * 1.9));
+        const cosH = Math.cos(helixAngle);
+        const sinH = Math.sin(helixAngle);
+
+        wOffsetVec
+          .copy(wRightVec)
+          .multiplyScalar(cosH * radialR)
+          .addScaledVector(wBinormVec, sinH * radialR);
+
+        // Ribbon width tilts organically around the helix tangent
+        wWidthVec
+          .copy(wRightVec)
+          .multiplyScalar(-sinH)
+          .addScaledVector(wBinormVec, cosH)
+          .normalize();
+        const halfWidth = (1.1 + 1.25 * Math.sin(u * Math.PI)) * (0.85 + 0.25 * (r % 2));
+
+        const lx = center.x + wOffsetVec.x - wWidthVec.x * halfWidth;
+        const ly = center.y + wOffsetVec.y - wWidthVec.y * halfWidth;
+        const lz = center.z + wOffsetVec.z - wWidthVec.z * halfWidth;
+
+        const rx = center.x + wOffsetVec.x + wWidthVec.x * halfWidth;
+        const ry = center.y + wOffsetVec.y + wWidthVec.y * halfWidth;
+        const rz = center.z + wOffsetVec.z + wWidthVec.z * halfWidth;
+
+        ribbonPositions.push(lx, ly, lz, rx, ry, rz);
+        ribbonUvs.push(u, 0, u, 1);
+        ribbonSeeds.push(phaseSeed, flowSpeed, phaseSeed, flowSpeed);
+        ribbonKinds.push(kindCode, kindCode);
+
+        if (s < ribbonSegs) {
+          const i0 = baseVertex + s * 2;
+          const i1 = i0 + 1;
+          const i2 = i0 + 2;
+          const i3 = i0 + 3;
+          ribbonIndices.push(i0, i2, i1, i1, i2, i3);
+        }
+      }
+    }
+
+    // Build rushing aerodynamic airflow streaks along the corridor
+    for (let k = 0; k < streaksPerStream; k++) {
+      const t0 = 0.08 + ((k + 0.35) / streaksPerStream) * 0.84;
+      const center = curve.getPointAt(t0);
+      const tan = curve.getTangentAt(t0).normalize();
+      const refUp = Math.abs(tan.y) > 0.9 ? wAltUpVec : wUpVec;
+      wRightVec.crossVectors(tan, refUp).normalize();
+      wBinormVec.crossVectors(wRightVec, tan).normalize();
+
+      const ang = k * 2.39996 + streamIdx * 1.1;
+      const distFrac = 0.16 + ((k * 0.37) % 0.68);
+      const radialDist = def.radius * distFrac;
+      const sx =
+        center.x +
+        (wRightVec.x * Math.cos(ang) + wBinormVec.x * Math.sin(ang)) * radialDist;
+      const sy =
+        center.y +
+        (wRightVec.y * Math.cos(ang) + wBinormVec.y * Math.sin(ang)) * radialDist;
+      const sz =
+        center.z +
+        (wRightVec.z * Math.cos(ang) + wBinormVec.z * Math.sin(ang)) * radialDist;
+
+      const phase = ((k * 0.29 + streamIdx * 0.17) % 1 + 1) % 1;
+      const spd = 0.42 + (k % 5) * 0.07;
+      const streakLen = 14 + (k % 4) * 4.5;
+
+      const vBase = streakCenters.length / 3;
+      const corners: [number, number][] = [
+        [-1, -1],
+        [1, -1],
+        [1, 1],
+        [-1, 1],
+      ];
+      for (const [cx, cy] of corners) {
+        streakCenters.push(sx, sy, sz);
+        streakTangents.push(tan.x, tan.y, tan.z);
+        streakCorners.push(cx, cy);
+        streakSeeds.push(phase, spd, streakLen);
+        streakKinds.push(kindCode);
+      }
+      streakIndices.push(vBase, vBase + 1, vBase + 2, vBase, vBase + 2, vBase + 3);
+    }
+  });
+
+  const windRibbonGeo = new THREE.BufferGeometry();
+  windRibbonGeo.setAttribute('position', new THREE.Float32BufferAttribute(ribbonPositions, 3));
+  windRibbonGeo.setAttribute('uv', new THREE.Float32BufferAttribute(ribbonUvs, 2));
+  windRibbonGeo.setAttribute('aSeed', new THREE.Float32BufferAttribute(ribbonSeeds, 2));
+  windRibbonGeo.setAttribute('aKind', new THREE.Float32BufferAttribute(ribbonKinds, 1));
+  windRibbonGeo.setIndex(ribbonIndices);
+  windRibbonGeo.computeBoundingSphere();
+
+  const windRibbonMaterial = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime: { value: 0 },
+      uStormFactor: { value: 0 },
+    },
+    vertexShader: `
+      attribute vec2 aSeed;
+      attribute float aKind;
+      uniform float uTime;
+      varying vec2 vUv;
+      varying vec2 vSeed;
+      varying float vKind;
+      varying float vViewDist;
+
+      void main() {
+        vUv = uv;
+        vSeed = aSeed;
+        vKind = aKind;
+        vec3 pos = position;
+        float flutter = sin(uv.x * 24.0 - uTime * 3.8 + aSeed.x * 6.2831) * 0.45;
+        pos.y += flutter * sin(uv.x * 3.14159);
+        vec4 mvPos = viewMatrix * vec4(pos, 1.0);
+        vViewDist = -mvPos.z;
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uStormFactor;
+      varying vec2 vUv;
+      varying vec2 vSeed;
+      varying float vKind;
+      varying float vViewDist;
+
+      void main() {
+        float flow = uTime * vSeed.y * (1.0 + uStormFactor * 0.42);
+        float w1 = pow(0.5 + 0.5 * sin((vUv.x * 4.5 - flow + vSeed.x) * 6.28318), 2.6);
+        float w2 = pow(0.5 + 0.5 * sin((vUv.x * 9.0 - flow * 1.45 + vSeed.x * 2.1) * 6.28318), 3.4);
+        float crossProfile = pow(sin(clamp(vUv.y, 0.0, 1.0) * 3.14159), 1.55);
+        float endFade = smoothstep(0.0, 0.12, vUv.x) * smoothstep(1.0, 0.86, vUv.x);
+
+        float nearFade = smoothstep(6.0, 22.0, vViewDist);
+        float farFade = 1.0 - smoothstep(2600.0, 5400.0, vViewDist);
+
+        float ribbonMask = crossProfile * endFade * (0.14 + w1 * 0.56 + w2 * 0.35);
+        float alpha = clamp(ribbonMask * nearFade * farFade * (0.46 + uStormFactor * 0.14), 0.0, 0.62);
+        if (alpha < 0.01) discard;
+
+        vec3 jetCol = mix(vec3(0.42, 0.82, 0.99), vec3(0.95, 0.99, 1.0), w2 * 0.65 + crossProfile * 0.3);
+        vec3 thermalCol = mix(vec3(0.98, 0.64, 0.24), vec3(1.0, 0.94, 0.76), w2 * 0.6 + crossProfile * 0.35);
+        vec3 draftCol = mix(vec3(0.32, 0.88, 0.84), vec3(0.92, 0.99, 0.98), w2 * 0.6 + crossProfile * 0.35);
+
+        vec3 col = vKind > 1.5 ? draftCol : (vKind > 0.5 ? thermalCol : jetCol);
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
+
+  const windRibbonMesh = new THREE.Mesh(windRibbonGeo, windRibbonMaterial);
+  windRibbonMesh.frustumCulled = false;
+  windRibbonMesh.renderOrder = 4;
+  scene.add(windRibbonMesh);
+  disposables.push(windRibbonGeo, windRibbonMaterial);
+
+  const windStreakGeo = new THREE.BufferGeometry();
+  windStreakGeo.setAttribute('position', new THREE.Float32BufferAttribute(streakCenters, 3));
+  windStreakGeo.setAttribute('aTangent', new THREE.Float32BufferAttribute(streakTangents, 3));
+  windStreakGeo.setAttribute('aCorner', new THREE.Float32BufferAttribute(streakCorners, 2));
+  windStreakGeo.setAttribute('aSeed', new THREE.Float32BufferAttribute(streakSeeds, 3));
+  windStreakGeo.setAttribute('aKind', new THREE.Float32BufferAttribute(streakKinds, 1));
+  windStreakGeo.setIndex(streakIndices);
+  windStreakGeo.computeBoundingSphere();
+
+  const windStreakMaterial = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime: { value: 0 },
+      uStormFactor: { value: 0 },
+    },
+    vertexShader: `
+      attribute vec3 aTangent;
+      attribute vec2 aCorner;
+      attribute vec3 aSeed;
+      attribute float aKind;
+      uniform float uTime;
+      uniform float uStormFactor;
+      varying vec2 vCorner;
+      varying float vCycle;
+      varying float vKind;
+      varying float vViewDist;
+
+      void main() {
+        vCorner = aCorner;
+        vKind = aKind;
+
+        float cycle = fract(uTime * aSeed.y * (1.0 + uStormFactor * 0.45) + aSeed.x);
+        vCycle = cycle;
+
+        vec3 center = position + aTangent * ((cycle - 0.5) * 58.0);
+        vec3 toCam = normalize(cameraPosition - center + vec3(0.0001, 0.0002, 0.0001));
+        vec3 sideAxis = cross(aTangent, toCam);
+        float sideLen = length(sideAxis);
+        sideAxis = sideLen > 0.001 ? sideAxis / sideLen : vec3(1.0, 0.0, 0.0);
+
+        float widthHalf = 0.34 * (1.0 - abs(aCorner.x) * 0.55);
+        vec3 worldPos = center + aTangent * (aCorner.x * aSeed.z * 0.5) + sideAxis * (aCorner.y * widthHalf);
+        vec4 mvPos = viewMatrix * vec4(worldPos, 1.0);
+        vViewDist = -mvPos.z;
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vCorner;
+      varying float vCycle;
+      varying float vKind;
+      varying float vViewDist;
+
+      void main() {
+        float lifeFade = sin(clamp(vCycle, 0.0, 1.0) * 3.14159);
+        float along = 1.0 - abs(vCorner.x);
+        float across = 1.0 - abs(vCorner.y);
+        float shape = pow(max(0.0, along), 0.7) * pow(max(0.0, across), 1.6);
+
+        float nearFade = smoothstep(5.0, 18.0, vViewDist);
+        float farFade = 1.0 - smoothstep(1800.0, 4200.0, vViewDist);
+        float alpha = clamp(shape * lifeFade * nearFade * farFade * 0.78, 0.0, 0.85);
+        if (alpha < 0.015) discard;
+
+        vec3 jetCol = vec3(0.88, 0.97, 1.0);
+        vec3 thermalCol = vec3(1.0, 0.91, 0.68);
+        vec3 draftCol = vec3(0.82, 0.99, 0.96);
+        vec3 col = vKind > 1.5 ? draftCol : (vKind > 0.5 ? thermalCol : jetCol);
+
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
+
+  const windStreakMesh = new THREE.Mesh(windStreakGeo, windStreakMaterial);
+  windStreakMesh.frustumCulled = false;
+  windStreakMesh.renderOrder = 5;
+  scene.add(windStreakMesh);
+  disposables.push(windStreakGeo, windStreakMaterial);
 
   return {
     skyMaterial: skyMat,
     cloudMaterial: cloudMat,
+    cloudShadowUniforms,
     oceanMesh,
     oceanMaterial,
     oceanCubeCamera,
     oceanRenderTarget,
     cloudClusters,
+    windCurrents,
+    windRibbonMaterial,
+    windStreakMaterial,
     narrowPillars,
     pirateShips,
     destructibleBuildings,

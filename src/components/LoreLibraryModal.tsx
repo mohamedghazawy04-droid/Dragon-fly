@@ -57,11 +57,11 @@ export const LoreLibraryModal: React.FC<LoreLibraryModalProps> = ({
 
   return (
     <div
-      className="pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-black/65 p-3 md:p-6"
+      className="pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-3 md:p-6"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl p-5 md:p-6 hud-surface-strong border border-amber-400/35 shadow-2xl text-right"
+        className="hud-scroll w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl p-5 md:p-6 hud-surface-strong border border-amber-400/30 text-right"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -73,7 +73,7 @@ export const LoreLibraryModal: React.FC<LoreLibraryModalProps> = ({
                 مكتبة أساطير فرسان التنانين
               </h2>
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-slate-400">
               <span className="font-mono-nums text-amber-200">
                 المفتوح: {unlockedCount} / {ANCIENT_LORE_TALES.length}
               </span>
@@ -99,9 +99,9 @@ export const LoreLibraryModal: React.FC<LoreLibraryModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="إغلاق"
-            className="rounded-lg p-2 text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+            className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 

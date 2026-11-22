@@ -39,6 +39,8 @@ export interface DragonRig {
     dirWorld?: THREE.Vector3,
     colorHex?: number,
   ) => void;
+  setFusionGlow: (intensity: number, colorHex?: number) => void;
+  setDamageScars: (severity: number, timeSec: number) => void;
   dispose: () => void;
 }
 
@@ -493,31 +495,158 @@ export function createDragonRig(
     uLightningReflect: { value: 0 },
     uLightningColor: { value: new THREE.Color(0xcceeff) },
     uLightningDir: { value: new THREE.Vector3(0.4, 0.85, -0.3).normalize() },
+    uFusionAura: { value: 0 },
+    uFusionColor: { value: new THREE.Color(0xffb84d) },
+    uDamageSeverity: { value: 0 },
+    uScarTime: { value: 0 },
+    uScarCoreColor: {
+      value: new THREE.Color(spec.element === 'ice' ? 0xff3b5c : 0xff2a00),
+    },
+    uScarEdgeColor: {
+      value: new THREE.Color(spec.element === 'ice' ? 0x7dd3fc : 0xffaa2b),
+    },
   };
 
   const applyLightningReflectionShader = (mat: THREE.MeshPhysicalMaterial, gain: number) => {
-    mat.customProgramCacheKey = () => `dragon-lightning-reflect-v1-${gain}`;
+    mat.customProgramCacheKey = () => `dragon-skin-v3-${gain}`;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uLightningReflect = lightningUniforms.uLightningReflect;
       shader.uniforms.uLightningColor = lightningUniforms.uLightningColor;
       shader.uniforms.uLightningDir = lightningUniforms.uLightningDir;
+      shader.uniforms.uFusionAura = lightningUniforms.uFusionAura;
+      shader.uniforms.uFusionColor = lightningUniforms.uFusionColor;
+      shader.uniforms.uDamageSeverity = lightningUniforms.uDamageSeverity;
+      shader.uniforms.uScarTime = lightningUniforms.uScarTime;
+      shader.uniforms.uScarCoreColor = lightningUniforms.uScarCoreColor;
+      shader.uniforms.uScarEdgeColor = lightningUniforms.uScarEdgeColor;
+
+      shader.vertexShader = `varying vec3 vScarPos;\n` + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `
+        #include <begin_vertex>
+        vScarPos = position;
+        `,
+      );
 
       shader.fragmentShader =
-        `uniform float uLightningReflect;\nuniform vec3 uLightningColor;\nuniform vec3 uLightningDir;\n` +
-        shader.fragmentShader;
+        `uniform float uLightningReflect;
+uniform vec3 uLightningColor;
+uniform vec3 uLightningDir;
+uniform float uFusionAura;
+uniform vec3 uFusionColor;
+uniform float uDamageSeverity;
+uniform float uScarTime;
+uniform vec3 uScarCoreColor;
+uniform vec3 uScarEdgeColor;
+varying vec3 vScarPos;
+
+vec3 scarHash3(vec3 p) {
+  p = vec3(
+    dot(p, vec3(127.1, 311.7, 74.7)),
+    dot(p, vec3(269.5, 183.3, 246.1)),
+    dot(p, vec3(113.5, 271.9, 124.6))
+  );
+  return fract(sin(p) * 43758.5453123);
+}
+
+float scarVoronoiEdge(vec3 x) {
+  vec3 n = floor(x);
+  vec3 f = fract(x);
+  float d1 = 8.0;
+  float d2 = 8.0;
+  for (int k = -1; k <= 1; k++) {
+    for (int j = -1; j <= 1; j++) {
+      for (int i = -1; i <= 1; i++) {
+        vec3 g = vec3(float(i), float(j), float(k));
+        vec3 o = scarHash3(n + g);
+        vec3 r = g + (0.18 + 0.64 * o) - f;
+        float d = dot(r, r);
+        if (d < d1) {
+          d2 = d1;
+          d1 = d;
+        } else if (d < d2) {
+          d2 = d;
+        }
+      }
+    }
+  }
+  return sqrt(d2) - sqrt(d1);
+}
+
+void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, out float glowMask) {
+  charMask = 0.0;
+  glowMask = 0.0;
+  if (sev <= 0.01) return;
+
+  // Organic domain warp so fissures follow musculature & scale seams
+  vec3 warp = vec3(
+    sin(p.y * 2.3 + p.z * 1.4),
+    cos(p.z * 2.1 - p.x * 1.6),
+    sin(p.x * 2.5 + p.y * 1.3)
+  ) * 0.24;
+  vec3 sp = p * 1.32 + warp;
+
+  // 1. Voronoi tectonic fissures spreading with damage severity
+  float vEdge = scarVoronoiEdge(sp);
+  float cellPick = fract(sin(dot(floor(sp * 0.55), vec3(12.9898, 78.233, 45.164))) * 43758.5453);
+  float cellSpread = smoothstep(0.05, 0.85, sev * 1.25 - cellPick * 0.58);
+  float crackWidth = mix(0.035, 0.145, sev);
+  float crackCore = (1.0 - smoothstep(0.0, crackWidth, vEdge)) * cellSpread;
+  float crackChar = (1.0 - smoothstep(crackWidth * 0.6, crackWidth * 2.4, vEdge)) * cellSpread;
+
+  // 2. Jagged claw / sword battle slashes across flanks, chest & wing membranes
+  float slashWaveA = abs(sin((p.x * 1.9 + p.y * 1.5 + sin(p.z * 2.7) * 0.65) * 1.45));
+  float slashWaveB = abs(sin((p.z * 1.7 - p.y * 2.1 + cos(p.x * 2.4) * 0.55) * 1.3));
+  float patchMask = smoothstep(0.22, 0.78, sin(p.x * 0.95 + 1.2) * cos(p.z * 0.85 - 0.5) * 0.5 + 0.5);
+  float slashReveal = smoothstep(0.06, 0.52, sev);
+  float slashCore = (1.0 - smoothstep(0.0, mix(0.04, 0.11, sev), min(slashWaveA, slashWaveB))) * patchMask * slashReveal;
+  float slashChar = (1.0 - smoothstep(0.05, 0.22, min(slashWaveA, slashWaveB))) * patchMask * slashReveal;
+
+  float combinedCore = clamp(max(crackCore, slashCore * 0.92), 0.0, 1.0);
+  charMask = clamp(max(crackChar, slashChar * 0.85), 0.0, 1.0);
+
+  // Urgent rhythmic heartbeat / molten ember pulse when critically wounded
+  float pulseRate = 3.8 + sev * 8.5;
+  float pulse = 0.66 + 0.34 * sin(tSec * pulseRate - length(p) * 0.55);
+  glowMask = combinedCore * (0.45 + 0.95 * sev) * pulse;
+}
+` + shader.fragmentShader;
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <color_fragment>',
+        `
+        #include <color_fragment>
+        float _scarChar = 0.0;
+        float _scarGlow = 0.0;
+        if (uDamageSeverity > 0.01) {
+          evalDragonDamageScars(vScarPos, uDamageSeverity, uScarTime, _scarChar, _scarGlow);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.035, 0.02, 0.018), _scarChar * (0.55 + uDamageSeverity * 0.35));
+        }
+        `,
+      );
 
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <opaque_fragment>',
         `
-        if (uLightningReflect > 0.002) {
+        if (uLightningReflect > 0.002 || uFusionAura > 0.002 || uDamageSeverity > 0.01) {
           vec3 lViewDir = normalize(vViewPosition);
           vec3 lSurfN = normalize(normal);
           float lFresnel = pow(1.0 - clamp(abs(dot(lViewDir, lSurfN)), 0.0, 1.0), 2.2);
-          vec3 lDirView = normalize((viewMatrix * vec4(uLightningDir, 0.0)).xyz);
-          vec3 lHalf = normalize(lDirView + lViewDir);
-          float lSpec = pow(max(dot(lSurfN, lHalf), 0.0), 40.0);
-          float lWrap = max(dot(lSurfN, lDirView) * 0.55 + 0.45, 0.0);
-          outgoingLight += uLightningColor * uLightningReflect * ${gain.toFixed(2)} * (lFresnel * 1.45 + lSpec * 1.95 + lWrap * 0.25);
+          if (uLightningReflect > 0.002) {
+            vec3 lDirView = normalize((viewMatrix * vec4(uLightningDir, 0.0)).xyz);
+            vec3 lHalf = normalize(lDirView + lViewDir);
+            float lSpec = pow(max(dot(lSurfN, lHalf), 0.0), 40.0);
+            float lWrap = max(dot(lSurfN, lDirView) * 0.55 + 0.45, 0.0);
+            outgoingLight += uLightningColor * uLightningReflect * ${gain.toFixed(2)} * (lFresnel * 1.45 + lSpec * 1.95 + lWrap * 0.25);
+          }
+          if (uFusionAura > 0.002) {
+            outgoingLight += uFusionColor * uFusionAura * ${gain.toFixed(2)} * (lFresnel * 1.65 + 0.16);
+          }
+          if (uDamageSeverity > 0.01 && _scarGlow > 0.002) {
+            vec3 crackCol = mix(uScarCoreColor, uScarEdgeColor, smoothstep(0.35, 1.15, _scarGlow));
+            outgoingLight += crackCol * (_scarGlow * (1.8 + uDamageSeverity * 2.2) * ${gain.toFixed(2)});
+          }
         }
         #include <opaque_fragment>
         `,
@@ -552,13 +681,15 @@ export function createDragonRig(
   });
   applyLightningReflectionShader(armorMat, 1.25);
 
-  const bellyMat = new THREE.MeshStandardMaterial({
+  const bellyMat = new THREE.MeshPhysicalMaterial({
     color: spec.bellyColor,
     normalMap: scaleMaps.normalMap,
     normalScale: new THREE.Vector2(1.0, 1.0),
     roughness: 0.58,
     metalness: 0.12,
+    clearcoat: 0.14,
   });
+  applyLightningReflectionShader(bellyMat, 0.9);
 
   const membraneMat = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
@@ -1524,6 +1655,28 @@ export function createDragonRig(
     membraneMat.clearcoat = 0.24 + boost * 0.52;
   };
 
+  const setFusionGlow = (intensity: number, colorHex?: number) => {
+    const clamped = Math.max(0, Math.min(1.5, intensity));
+    lightningUniforms.uFusionAura.value = clamped;
+    if (colorHex !== undefined) {
+      lightningUniforms.uFusionColor.value.setHex(colorHex);
+      auraLight.color.setHex(colorHex);
+    } else {
+      auraLight.color.setHex(spec.eyeColor);
+    }
+    const baseAura = isPlayer ? 1.8 : 1.0;
+    auraLight.intensity = baseAura + clamped * 4.2;
+    auraLight.distance = 24 + clamped * 22;
+    eyeMat.emissiveIntensity = 1.65 + clamped * 1.8;
+    bladeMat.emissiveIntensity = 0.28 + clamped * 1.45;
+  };
+
+  const setDamageScars = (severity: number, timeSec: number) => {
+    const clamped = Math.max(0, Math.min(1, severity));
+    lightningUniforms.uDamageSeverity.value = clamped;
+    lightningUniforms.uScarTime.value = timeSec;
+  };
+
   return {
     root,
     bodyGroup,
@@ -1553,6 +1706,8 @@ export function createDragonRig(
     auraLight,
     setFrozen,
     setLightningReflection,
+    setFusionGlow,
+    setDamageScars,
     dispose,
   };
 }

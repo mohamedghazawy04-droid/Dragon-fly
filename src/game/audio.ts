@@ -1,6 +1,18 @@
 import { ElementType, LoreMood, LoreTale } from './types';
 
 export type CrashMaterial = 'stone' | 'wood' | 'water' | 'flesh';
+
+export interface WingbeatOptions {
+  speed?: number;
+  bankAngleRad?: number;
+  turnIntensity?: number;
+  boosting?: boolean;
+  climbing?: boolean;
+  landing?: boolean;
+  windCurrent?: number;
+  element?: ElementType;
+}
+
 export type KnightVoiceCategory =
   | 'takeoff'
   | 'boost'
@@ -9,7 +21,8 @@ export type KnightVoiceCategory =
   | 'sword_kill'
   | 'danger'
   | 'landing'
-  | 'victory';
+  | 'victory'
+  | 'fusion';
 
 const KNIGHT_VOICE_LINES: Record<KnightVoiceCategory, string[]> = {
   takeoff: [
@@ -51,6 +64,11 @@ const KNIGHT_VOICE_LINES: Record<KnightVoiceCategory, string[]> = {
     'الله أكبر، قد تمّ النصر!',
     'هيا بنا صغيري، إنّ السماء لنا!',
     'عاش أميرنا وفرسان التنانين!',
+  ],
+  fusion: [
+    'اتّحدت روحانا في السماء! قد حان وقت الاندماج!',
+    'نور الفارس والتنين لا يُقهر!',
+    'انصهر عهدنا في قوةٍ واحدة!',
   ],
 };
 
@@ -201,18 +219,30 @@ export class DragonAudio {
     isFlying: boolean,
     rainIntensity = 0,
     stormIntensity = 0,
+    windCurrentIntensity = 0,
+    turnIntensity = 0,
   ): void {
     if (!this.ctx || !this.windGain || !this.windFilter || !this.skimGain || !this.rainGain) {
       return;
     }
     const now = this.ctx.currentTime;
     const normSpeed = Math.min(1.5, Math.max(0, speed / 75));
+    const normTurn = isFlying ? Math.min(1, Math.max(0, turnIntensity)) : 0;
     const galeBoost = stormIntensity * 0.11;
-    const targetWindGain = (isFlying ? 0.04 + normSpeed * 0.18 : 0.025) + galeBoost;
-    const targetWindFreq = (isFlying ? 240 + normSpeed * 580 : 200) + stormIntensity * 180;
+    const slipstreamBoost = isFlying ? windCurrentIntensity * 0.16 : 0;
+    const bankWindGain = normTurn * (0.025 + normSpeed * 0.055);
+    const bankWindFreq = normTurn * (180 + normSpeed * 210);
+    const targetWindGain =
+      (isFlying ? 0.04 + normSpeed * 0.18 : 0.025) + galeBoost + slipstreamBoost + bankWindGain;
+    const targetWindFreq =
+      (isFlying ? 240 + normSpeed * 580 : 200) +
+      stormIntensity * 180 +
+      (isFlying ? windCurrentIntensity * 420 : 0) +
+      bankWindFreq;
 
     this.windGain.gain.setTargetAtTime(targetWindGain, now, 0.12);
     this.windFilter.frequency.setTargetAtTime(targetWindFreq, now, 0.12);
+    this.windFilter.Q.setTargetAtTime(0.85 + normTurn * 0.72, now, 0.12);
     this.skimGain.gain.setTargetAtTime(isSkimming && isFlying ? 0.24 : 0, now, 0.08);
     this.rainGain.gain.setTargetAtTime(rainIntensity * 0.18, now, 0.25);
   }
@@ -452,46 +482,115 @@ export class DragonAudio {
   }
 
   /**
-   * Realistic massive leathery wing downstroke displacing air.
+   * Reactive aerodynamic wing downstroke displacing air, dynamically shifting pitch,
+   * crispness, membrane air-slice, and subtle stereo pan based on speed and turn/bank angle.
    */
-  public playWingbeat(): void {
+  public playWingbeat(opts?: WingbeatOptions): void {
     if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
     const now = this.ctx.currentTime;
 
-    // Air swoosh through low-passed pink noise
+    const speed = opts?.speed ?? 46;
+    const bankAngleRad = opts?.bankAngleRad ?? 0;
+    const turnIntensity = opts?.turnIntensity ?? 0;
+    const boosting = opts?.boosting ?? false;
+    const climbing = opts?.climbing ?? false;
+    const landing = opts?.landing ?? false;
+    const windCurrent = opts?.windCurrent ?? 0;
+    const element = opts?.element ?? 'fire';
+
+    const speedNorm = Math.min(1.4, Math.max(0, (speed - 18) / 85));
+    const bankNorm = Math.min(1, Math.abs(bankAngleRad) / (Math.PI * 0.5));
+    const effectiveTurn = Math.max(Math.min(1, Math.max(0, turnIntensity)), bankNorm);
+    const speciesPitch = element === 'ice' ? 1.12 : element === 'rock' ? 0.85 : 1.0;
+
+    const pitchMul =
+      (1 +
+        speedNorm * 0.44 +
+        effectiveTurn * 0.36 +
+        (climbing ? 0.08 : 0) +
+        (boosting ? 0.07 : 0)) *
+      speciesPitch;
+    const durScale = Math.max(
+      0.52,
+      1.0 - speedNorm * 0.25 - effectiveTurn * 0.22 - (landing ? 0.1 : 0),
+    );
+
+    const panValue = Math.max(-0.42, Math.min(0.42, -Math.sin(bankAngleRad) * 0.38));
+    const panner =
+      Math.abs(panValue) > 0.02 && typeof this.ctx.createStereoPanner === 'function'
+        ? this.ctx.createStereoPanner()
+        : null;
+    if (panner) {
+      panner.pan.setValueAtTime(panValue, now);
+      panner.connect(this.masterGain);
+    }
+    const outNode: AudioNode = panner ?? this.masterGain;
+
+    // 1. Primary air-displacement swoosh through swept low-pass pink noise
     const air = this.ctx.createBufferSource();
     air.buffer = this.noiseBuffer;
 
     const lp = this.ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.Q.value = 1.2;
-    lp.frequency.setValueAtTime(480, now);
-    lp.frequency.exponentialRampToValueAtTime(75, now + 0.28);
+    lp.Q.value = 1.15 + effectiveTurn * 0.75 + speedNorm * 0.3;
+    const startFreq = Math.min(2600, (430 + speedNorm * 440 + effectiveTurn * 360) * speciesPitch);
+    const endFreq = Math.max(60, (74 + speedNorm * 78 + effectiveTurn * 65) * speciesPitch);
+    lp.frequency.setValueAtTime(startFreq, now);
+    lp.frequency.exponentialRampToValueAtTime(endFreq, now + 0.28 * durScale);
 
+    const primaryPeak =
+      0.28 + speedNorm * 0.11 + effectiveTurn * 0.11 + (boosting ? 0.05 : 0);
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.34, now + 0.05);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+    gain.gain.linearRampToValueAtTime(primaryPeak, now + 0.036 * durScale);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.34 * durScale);
 
     air.connect(lp);
     lp.connect(gain);
-    gain.connect(this.masterGain);
+    gain.connect(outNode);
     air.start(now);
-    air.stop(now + 0.36);
+    air.stop(now + 0.36 * durScale + 0.02);
 
-    // Subtle deep air-pressure displacement
+    // 2. Taut wing-membrane & feather air-slice transient (stronger during high speed & sharp banks)
+    const sliceGain = 0.035 + speedNorm * 0.1 + effectiveTurn * 0.15 + windCurrent * 0.06;
+    if (sliceGain > 0.04) {
+      const slice = this.ctx.createBufferSource();
+      slice.buffer = this.noiseBuffer;
+
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = 2.35 + effectiveTurn * 1.15;
+      bp.frequency.setValueAtTime(Math.min(3400, 920 * pitchMul), now);
+      bp.frequency.exponentialRampToValueAtTime(Math.max(180, 320 * pitchMul), now + 0.22 * durScale);
+
+      const sGain = this.ctx.createGain();
+      sGain.gain.setValueAtTime(0.001, now);
+      sGain.gain.linearRampToValueAtTime(sliceGain, now + 0.025 * durScale);
+      sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.24 * durScale);
+
+      slice.connect(bp);
+      bp.connect(sGain);
+      sGain.connect(outNode);
+      slice.start(now);
+      slice.stop(now + 0.26 * durScale + 0.02);
+    }
+
+    // 3. Deep air-pressure displacement chest thump (pitch tightens as stroke cadence increases)
     const sub = this.ctx.createOscillator();
     const subGain = this.ctx.createGain();
     sub.type = 'sine';
-    sub.frequency.setValueAtTime(64, now);
-    sub.frequency.exponentialRampToValueAtTime(28, now + 0.22);
+    sub.frequency.setValueAtTime(Math.min(128, 62 * pitchMul), now);
+    sub.frequency.exponentialRampToValueAtTime(Math.max(24, 27 * pitchMul), now + 0.21 * durScale);
     subGain.gain.setValueAtTime(0.001, now);
-    subGain.gain.linearRampToValueAtTime(0.09, now + 0.03);
-    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+    subGain.gain.linearRampToValueAtTime(
+      0.085 + (climbing || landing ? 0.035 : 0) + speedNorm * 0.02,
+      now + 0.024 * durScale,
+    );
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.24 * durScale);
     sub.connect(subGain);
-    subGain.connect(this.masterGain);
+    subGain.connect(outNode);
     sub.start(now);
-    sub.stop(now + 0.27);
+    sub.stop(now + 0.26 * durScale + 0.02);
   }
 
   public playCloudSlice(): void {
@@ -514,6 +613,45 @@ export class DragonAudio {
     gain.connect(this.masterGain);
     mist.start(now);
     mist.stop(now + 0.5);
+  }
+
+  public playWindCurrentEnter(): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    const rush = this.ctx.createBufferSource();
+    rush.buffer = this.noiseBuffer;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 2.4;
+    bp.frequency.setValueAtTime(340, now);
+    bp.frequency.exponentialRampToValueAtTime(1280, now + 0.28);
+    bp.frequency.exponentialRampToValueAtTime(620, now + 0.72);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.09);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.75);
+
+    rush.connect(bp);
+    bp.connect(gain);
+    gain.connect(this.masterGain);
+    rush.start(now);
+    rush.stop(now + 0.78);
+
+    const shimmer = this.ctx.createOscillator();
+    const sGain = this.ctx.createGain();
+    shimmer.type = 'sine';
+    shimmer.frequency.setValueAtTime(440, now);
+    shimmer.frequency.exponentialRampToValueAtTime(660, now + 0.35);
+    sGain.gain.setValueAtTime(0.001, now);
+    sGain.gain.linearRampToValueAtTime(0.032, now + 0.06);
+    sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+    shimmer.connect(sGain);
+    sGain.connect(this.masterGain);
+    shimmer.start(now);
+    shimmer.stop(now + 0.48);
   }
 
   /**
@@ -778,6 +916,48 @@ export class DragonAudio {
     gain.connect(this.masterGain);
     osc.start(now);
     osc.stop(now + 0.32);
+  }
+
+  /**
+   * Radiant harmonic spiritual-bond surge & sub-bass resonance sweep on activating Fusion.
+   */
+  public playFusionActivate(element: ElementType): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const root = element === 'ice' ? 293.66 : element === 'rock' ? 220 : 261.63;
+    const chord = [root, root * 1.25, root * 1.5, root * 2.0, root * 2.5];
+
+    chord.forEach((freq, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = idx < 2 ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(freq * 0.94, now + idx * 0.045);
+      osc.frequency.exponentialRampToValueAtTime(freq, now + idx * 0.045 + 0.18);
+
+      gain.gain.setValueAtTime(0.001, now + idx * 0.045);
+      gain.gain.linearRampToValueAtTime(0.14 / (1 + idx * 0.22), now + idx * 0.045 + 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.35 + idx * 0.08);
+
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + idx * 0.045);
+      osc.stop(now + 1.45 + idx * 0.08);
+    });
+
+    // Deep resonant spiritual pulse
+    const pulse = this.ctx.createOscillator();
+    const pGain = this.ctx.createGain();
+    pulse.type = 'sine';
+    pulse.frequency.setValueAtTime(110, now);
+    pulse.frequency.exponentialRampToValueAtTime(55, now + 0.75);
+    pGain.gain.setValueAtTime(0.001, now);
+    pGain.gain.linearRampToValueAtTime(0.32, now + 0.05);
+    pGain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+    pulse.connect(pGain);
+    pGain.connect(this.masterGain);
+    pulse.start(now);
+    pulse.stop(now + 0.85);
   }
 
   /**

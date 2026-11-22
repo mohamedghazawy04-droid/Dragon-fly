@@ -38,6 +38,8 @@ function loadSavedLayout(): HudLayoutConfig {
     return {
       positions: {
         vitals: safePoint(rawPos.vitals, DEFAULT_HUD_LAYOUT.positions.vitals),
+        bond: safePoint(rawPos.bond, DEFAULT_HUD_LAYOUT.positions.bond),
+        minimap: safePoint(rawPos.minimap, DEFAULT_HUD_LAYOUT.positions.minimap),
         joystick: safePoint(rawPos.joystick, DEFAULT_HUD_LAYOUT.positions.joystick),
         elements: safePoint(rawPos.elements, DEFAULT_HUD_LAYOUT.positions.elements),
         actions: safePoint(rawPos.actions, DEFAULT_HUD_LAYOUT.positions.actions),
@@ -90,7 +92,10 @@ const INITIAL_HUD: HudState = {
   alliesAlive: 3,
   enemiesAlive: 4,
   indicators: [],
+  minimapBlips: [],
+  playerHeadingDeg: 0,
   toastMessage: null,
+  activeFlightTip: null,
   woundsCount: 0,
   pointerLocked: false,
   weather: 'clear',
@@ -122,6 +127,16 @@ const INITIAL_HUD: HudState = {
   activeLoreSegment: 0,
   isLorePlaying: false,
   knightSpeechText: null,
+  spiritualBond: 25,
+  fusionActive: false,
+  fusionTimeLeft: 0,
+  fusionDuration: 14,
+  inWindCurrent: false,
+  windCurrentIntensity: 0,
+  autoCinematicEnabled: true,
+  cinematicActive: false,
+  cinematicLandmarkNameAr: null,
+  cinematicLandmarkSubtitleAr: null,
 };
 
 export default function App() {
@@ -237,6 +252,7 @@ export default function App() {
           onSelectMode={(m) => engineRef.current?.setMode(m)}
           onSelectWeatherMode={(wm) => engineRef.current?.setWeatherMode(wm)}
           onToggleCameraView={() => engineRef.current?.toggleCameraView()}
+          onToggleAutoCinematic={() => engineRef.current?.toggleAutoCinematic()}
           onTriggerHalfLoop={() => engineRef.current?.triggerHalfLoop()}
           onToggleKnifeEdge={() => engineRef.current?.toggleKnifeEdge()}
           onSkydive={() => engineRef.current?.jumpOffDragon()}
@@ -255,6 +271,8 @@ export default function App() {
           onRequestPointerLock={() => engineRef.current?.requestPointerLock()}
           onOpenUpgrades={() => setShowUpgradesModal(true)}
           onStartNewWar={() => engineRef.current?.startNewWarWave()}
+          onActivateFusion={() => engineRef.current?.activateFusion()}
+          onDismissFlightTip={() => engineRef.current?.dismissFlightTip()}
         />
       )}
 

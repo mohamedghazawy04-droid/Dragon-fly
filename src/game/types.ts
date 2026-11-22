@@ -329,6 +329,38 @@ export const WORLD_LANDMARKS: LandmarkInfo[] = [
     y: 62,
     z: 1220,
   },
+  {
+    id: 'eastern_sky_spires',
+    nameAr: 'أبراج السماء الشرقية',
+    subtitleAr: 'قمم شاهقة وتيارات هوائية عاتية في الأفق الشرقي',
+    x: 2950,
+    y: 165,
+    z: -2350,
+  },
+  {
+    id: 'southern_coral_atoll',
+    nameAr: 'أرخبيل المرجان الجنوبي',
+    subtitleAr: 'بحيرة فيروزية وجزر نخيل دافئة في أقصى الجنوب',
+    x: 2450,
+    y: 46,
+    z: 2780,
+  },
+  {
+    id: 'northern_glacier_crown',
+    nameAr: 'تاج الجليد الأعظم',
+    subtitleAr: 'جبال جليدية شاهقة تتلألأ تحت الشمس القطبية',
+    x: -360,
+    y: 185,
+    z: -3350,
+  },
+  {
+    id: 'western_storm_isles',
+    nameAr: 'جزر العواصف الغربية',
+    subtitleAr: 'جروف بازلتية وعواصف عاتية في البحر الغربي السحيق',
+    x: -3250,
+    y: 125,
+    z: 260,
+  },
 ];
 
 export interface EnemyIndicator {
@@ -344,12 +376,42 @@ export interface EnemyIndicator {
   isAlly: boolean;
 }
 
+export type MinimapBlipKind =
+  | 'enemy_dragon'
+  | 'ally_dragon'
+  | 'pirate_ship'
+  | 'mission_landmark'
+  | 'sanctuary';
+
+export type ThreatLevel = 'low' | 'medium' | 'high' | 'critical';
+
+export interface MinimapBlip {
+  id: string;
+  kind: MinimapBlipKind;
+  relX: number;
+  relY: number;
+  distance: number;
+  clamped: boolean;
+  threat: ThreatLevel;
+  labelAr?: string;
+}
+
 export type ManeuverKind =
   | 'none'
   | 'sharp_turn'
   | 'knife_edge'
   | 'half_loop'
   | 'steep_dive';
+
+export type FlightTipCategory = 'maneuver' | 'landmark';
+
+export interface FlightTip {
+  id: string;
+  category: FlightTipCategory;
+  titleAr: string;
+  bodyAr: string;
+  mechanicTagAr: string;
+}
 
 export interface HudState {
   phase: GamePhase;
@@ -376,7 +438,10 @@ export interface HudState {
   alliesAlive: number;
   enemiesAlive: number;
   indicators: EnemyIndicator[];
+  minimapBlips: MinimapBlip[];
+  playerHeadingDeg: number;
   toastMessage: string | null;
+  activeFlightTip: FlightTip | null;
   woundsCount: number;
   pointerLocked: boolean;
   weather: WeatherState;
@@ -408,9 +473,26 @@ export interface HudState {
   activeLoreSegment: number;
   isLorePlaying: boolean;
   knightSpeechText: string | null;
+  spiritualBond: number;
+  fusionActive: boolean;
+  fusionTimeLeft: number;
+  fusionDuration: number;
+  inWindCurrent: boolean;
+  windCurrentIntensity: number;
+  autoCinematicEnabled: boolean;
+  cinematicActive: boolean;
+  cinematicLandmarkNameAr: string | null;
+  cinematicLandmarkSubtitleAr: string | null;
 }
 
-export type HudControlId = 'joystick' | 'attack' | 'elements' | 'actions' | 'vitals';
+export type HudControlId =
+  | 'joystick'
+  | 'attack'
+  | 'elements'
+  | 'actions'
+  | 'vitals'
+  | 'bond'
+  | 'minimap';
 
 export interface HudPoint {
   xPct: number;
@@ -427,14 +509,16 @@ export interface HudLayoutConfig {
 
 export const DEFAULT_HUD_LAYOUT: HudLayoutConfig = {
   positions: {
-    vitals: { xPct: 14, yPct: 7 },
-    joystick: { xPct: 10, yPct: 79 },
-    elements: { xPct: 86, yPct: 60 },
-    actions: { xPct: 76, yPct: 80 },
-    attack: { xPct: 91, yPct: 80 },
+    vitals: { xPct: 12, yPct: 7 },
+    bond: { xPct: 12, yPct: 19 },
+    minimap: { xPct: 92, yPct: 24 },
+    joystick: { xPct: 10, yPct: 80 },
+    elements: { xPct: 85, yPct: 60 },
+    actions: { xPct: 76, yPct: 79 },
+    attack: { xPct: 91, yPct: 79 },
   },
   buttonScale: 0.9,
-  buttonOpacity: 0.78,
+  buttonOpacity: 0.84,
   compactTopBar: false,
   showIndicators: true,
 };
@@ -446,27 +530,31 @@ export const HUD_LAYOUT_PRESETS: Record<
   standard: DEFAULT_HUD_LAYOUT,
   compact_edges: {
     positions: {
-      vitals: { xPct: 13, yPct: 6 },
-      joystick: { xPct: 8, yPct: 82 },
-      elements: { xPct: 91, yPct: 54 },
-      actions: { xPct: 82, yPct: 84 },
-      attack: { xPct: 93, yPct: 83 },
+      vitals: { xPct: 11, yPct: 6.5 },
+      bond: { xPct: 11, yPct: 17.5 },
+      minimap: { xPct: 93, yPct: 21 },
+      joystick: { xPct: 8.5, yPct: 82 },
+      elements: { xPct: 88, yPct: 61 },
+      actions: { xPct: 78, yPct: 81 },
+      attack: { xPct: 93, yPct: 81 },
     },
-    buttonScale: 0.78,
-    buttonOpacity: 0.65,
+    buttonScale: 0.8,
+    buttonOpacity: 0.72,
     compactTopBar: true,
     showIndicators: true,
   },
   left_handed: {
     positions: {
-      vitals: { xPct: 86, yPct: 7 },
-      joystick: { xPct: 90, yPct: 79 },
-      elements: { xPct: 14, yPct: 60 },
-      actions: { xPct: 24, yPct: 80 },
-      attack: { xPct: 9, yPct: 80 },
+      vitals: { xPct: 88, yPct: 7 },
+      bond: { xPct: 88, yPct: 19 },
+      minimap: { xPct: 8, yPct: 24 },
+      joystick: { xPct: 90, yPct: 80 },
+      elements: { xPct: 15, yPct: 60 },
+      actions: { xPct: 24, yPct: 79 },
+      attack: { xPct: 9, yPct: 79 },
     },
     buttonScale: 0.9,
-    buttonOpacity: 0.78,
+    buttonOpacity: 0.84,
     compactTopBar: false,
     showIndicators: true,
   },
