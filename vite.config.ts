@@ -10,6 +10,20 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [
+      {
+        // يرفع سقف الطيران من 260م إلى 2200م (قرب الفضاء) وقت البيلد من غير لمس DragonEngine.ts
+        name: 'engine-ceiling-patch',
+        enforce: 'pre' as const,
+        transform(code: string, id: string) {
+          if (!id.replace(/\\/g, '/').endsWith('/src/game/DragonEngine.ts')) return null;
+          const next = code.replace(
+            /if \(this\.playerPos\.y > 260\) \{\s*this\.playerPos\.y = 260;/,
+            'if (this.playerPos.y > 2200) {\n      this.playerPos.y = 2200;',
+          );
+          if (next === code) this.warn('ceiling patch not applied');
+          return {code: next, map: null};
+        },
+      },
       react(),
       tailwindcss(),
       // Copies src/assets into dist/ so root-relative URLs like
