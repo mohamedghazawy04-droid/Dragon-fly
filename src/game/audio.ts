@@ -22,7 +22,8 @@ export type KnightVoiceCategory =
   | 'danger'
   | 'landing'
   | 'victory'
-  | 'fusion';
+  | 'fusion'
+  | 'commune';
 
 const KNIGHT_VOICE_LINES: Record<KnightVoiceCategory, string[]> = {
   takeoff: [
@@ -69,6 +70,12 @@ const KNIGHT_VOICE_LINES: Record<KnightVoiceCategory, string[]> = {
     'اتّحدت روحانا في السماء! قد حان وقت الاندماج!',
     'نور الفارس والتنين لا يُقهر!',
     'انصهر عهدنا في قوةٍ واحدة!',
+  ],
+  commune: [
+    'أنتَ رفيقُ السماء يا صغيري!',
+    'سَلمتَ يا شريك العهد!',
+    'قلبان في روحٍ واحدة، نحو القمة!',
+    'أحسنتَ الطيران يا رفيقي الشجاع!',
   ],
 };
 
@@ -652,6 +659,126 @@ export class DragonAudio {
     sGain.connect(this.masterGain);
     shimmer.start(now);
     shimmer.stop(now + 0.48);
+  }
+
+  public playBarrelRoll(side: -1 | 1 = 1): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // Sweeping spiral slipstream whoosh
+    const air = this.ctx.createBufferSource();
+    air.buffer = this.noiseBuffer;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.9;
+    bp.frequency.setValueAtTime(240, now);
+    bp.frequency.exponentialRampToValueAtTime(1480, now + 0.24);
+    bp.frequency.exponentialRampToValueAtTime(420, now + 0.56);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.28, now + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.58);
+
+    air.connect(bp);
+    bp.connect(gain);
+
+    if (typeof this.ctx.createStereoPanner === 'function') {
+      const panner = this.ctx.createStereoPanner();
+      panner.pan.setValueAtTime(-side * 0.45, now);
+      panner.pan.linearRampToValueAtTime(side * 0.65, now + 0.42);
+      gain.connect(panner);
+      panner.connect(this.masterGain);
+    } else {
+      gain.connect(this.masterGain);
+    }
+
+    air.start(now);
+    air.stop(now + 0.6);
+
+    // Crisp wing-tuck aerodynamic snap
+    const snap = this.ctx.createOscillator();
+    const sGain = this.ctx.createGain();
+    snap.type = 'triangle';
+    snap.frequency.setValueAtTime(260, now);
+    snap.frequency.exponentialRampToValueAtTime(115, now + 0.22);
+    sGain.gain.setValueAtTime(0.001, now);
+    sGain.gain.linearRampToValueAtTime(0.11, now + 0.02);
+    sGain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+    snap.connect(sGain);
+    sGain.connect(this.masterGain);
+    snap.start(now);
+    snap.stop(now + 0.26);
+  }
+
+  public playEvadeSuccess(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    const freqs = [660, 990, 1320];
+    freqs.forEach((f, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = idx === 0 ? 'triangle' : 'sine';
+      const t = now + idx * 0.045;
+      osc.frequency.setValueAtTime(f, t);
+      osc.frequency.exponentialRampToValueAtTime(f * 1.12, t + 0.16);
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(idx === 0 ? 0.08 : 0.055, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(t);
+      osc.stop(t + 0.24);
+    });
+  }
+
+  public playDragonAffection(element: ElementType): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // Warm chest purr / rumble answering the knight's touch or call
+    const purr = this.ctx.createOscillator();
+    const lp = this.ctx.createBiquadFilter();
+    const pGain = this.ctx.createGain();
+    purr.type = 'triangle';
+    const base = element === 'rock' ? 88 : element === 'ice' ? 124 : 106;
+    purr.frequency.setValueAtTime(base, now);
+    purr.frequency.linearRampToValueAtTime(base * 1.38, now + 0.24);
+    purr.frequency.linearRampToValueAtTime(base * 1.12, now + 0.65);
+
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(420, now);
+
+    pGain.gain.setValueAtTime(0.001, now);
+    pGain.gain.linearRampToValueAtTime(0.14, now + 0.08);
+    pGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+
+    purr.connect(lp);
+    lp.connect(pGain);
+    pGain.connect(this.masterGain);
+    purr.start(now);
+    purr.stop(now + 0.72);
+
+    // Affectionate melodic trill chirp
+    const chirp = this.ctx.createOscillator();
+    const cGain = this.ctx.createGain();
+    chirp.type = 'sine';
+    const cBase = element === 'rock' ? 240 : element === 'ice' ? 350 : 295;
+    chirp.frequency.setValueAtTime(cBase, now + 0.08);
+    chirp.frequency.exponentialRampToValueAtTime(cBase * 1.5, now + 0.26);
+    chirp.frequency.exponentialRampToValueAtTime(cBase * 1.28, now + 0.48);
+
+    cGain.gain.setValueAtTime(0.001, now + 0.08);
+    cGain.gain.linearRampToValueAtTime(0.075, now + 0.14);
+    cGain.gain.exponentialRampToValueAtTime(0.001, now + 0.54);
+
+    chirp.connect(cGain);
+    cGain.connect(this.masterGain);
+    chirp.start(now + 0.08);
+    chirp.stop(now + 0.56);
   }
 
   /**

@@ -15,6 +15,7 @@ import {
   Feather,
   Film,
   Flame,
+  HandHeart,
   Home,
   MapPin,
   Maximize2,
@@ -22,6 +23,8 @@ import {
   MousePointer2,
   Mountain,
   Move,
+  Palette,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Settings,
@@ -67,6 +70,7 @@ interface FlightHudProps {
   onToggleCameraView: () => void;
   onToggleAutoCinematic: () => void;
   onTriggerHalfLoop: () => void;
+  onTriggerBarrelRoll: () => void;
   onToggleKnifeEdge: () => void;
   onSkydive: () => void;
   onRecallDragon: () => void;
@@ -83,8 +87,10 @@ interface FlightHudProps {
   onFlyLandmark: (id: string) => void;
   onRequestPointerLock: () => void;
   onOpenUpgrades: () => void;
+  onOpenCustomize: () => void;
   onStartNewWar: () => void;
   onActivateFusion: () => void;
+  onCommuneDragon: () => void;
   onDismissFlightTip: () => void;
 }
 
@@ -102,6 +108,7 @@ export const FlightHud: React.FC<FlightHudProps> = ({
   onToggleCameraView,
   onToggleAutoCinematic,
   onTriggerHalfLoop,
+  onTriggerBarrelRoll,
   onToggleKnifeEdge,
   onSkydive,
   onRecallDragon,
@@ -118,8 +125,10 @@ export const FlightHud: React.FC<FlightHudProps> = ({
   onFlyLandmark,
   onRequestPointerLock,
   onOpenUpgrades,
+  onOpenCustomize,
   onStartNewWar,
   onActivateFusion,
+  onCommuneDragon,
   onDismissFlightTip,
 }) => {
   const [cinemaMode, setCinemaMode] = useState(false);
@@ -280,20 +289,55 @@ export const FlightHud: React.FC<FlightHudProps> = ({
         </>
       )}
 
-      {/* High-Speed / Boost Peripheral Motion-Blur Tunnel Vignette */}
+      {/* High-Speed Dive Glow, Motion Blur & Radial Speed Lines (intensifies near max speed or during Barrel Roll) */}
       {(hud.phase === 'flying' || hud.phase === 'skydiving') &&
-        hud.motionBlurIntensity > 0.08 && (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none fixed inset-0 z-10 transition-opacity duration-100"
-            style={{
-              opacity: Math.min(0.85, hud.motionBlurIntensity * 0.9),
-              background: hud.isBoosting
-                ? 'radial-gradient(ellipse 68% 64% at 50% 50%, transparent 56%, rgba(251, 146, 60, 0.12) 84%, rgba(7, 10, 16, 0.42) 100%)'
-                : 'radial-gradient(ellipse 70% 66% at 50% 50%, transparent 58%, rgba(125, 211, 252, 0.08) 85%, rgba(7, 10, 16, 0.34) 100%)',
-            }}
-          />
-        )}
+        (hud.motionBlurIntensity > 0.08 || hud.isBarrelRolling) && (() => {
+          const fxStrength = hud.isBarrelRolling
+            ? Math.max(0.85, hud.motionBlurIntensity)
+            : hud.motionBlurIntensity;
+          const speedRayColor = hud.isBarrelRolling
+            ? 'rgba(103, 232, 249, 0.34)'
+            : hud.isBoosting || hud.maneuverKind === 'steep_dive'
+              ? 'rgba(253, 186, 116, 0.30)'
+              : 'rgba(224, 242, 254, 0.24)';
+          const glowBg = hud.isBarrelRolling
+            ? 'radial-gradient(ellipse 68% 62% at 50% 50%, transparent 52%, rgba(34, 211, 238, 0.20) 82%, rgba(8, 51, 68, 0.48) 100%)'
+            : hud.isBoosting || hud.maneuverKind === 'steep_dive'
+              ? 'radial-gradient(ellipse 66% 62% at 50% 50%, transparent 52%, rgba(251, 146, 60, 0.18) 82%, rgba(12, 10, 20, 0.46) 100%)'
+              : 'radial-gradient(ellipse 68% 64% at 50% 50%, transparent 55%, rgba(125, 211, 252, 0.13) 84%, rgba(7, 10, 16, 0.38) 100%)';
+          const rayOpacity = Math.min(
+            0.85,
+            Math.max(0, (fxStrength - 0.22) * 1.15),
+          );
+          return (
+            <>
+              <div
+                aria-hidden="true"
+                className="pointer-events-none fixed inset-0 z-10 transition-opacity duration-100"
+                style={{
+                  opacity: Math.min(0.92, fxStrength * 0.95),
+                  background: glowBg,
+                }}
+              />
+              {rayOpacity > 0.02 && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none fixed inset-0 z-10 transition-opacity duration-100"
+                  style={{
+                    opacity: rayOpacity,
+                    background: `repeating-conic-gradient(from ${
+                      hud.isBarrelRolling ? (hud.bankAngleDeg % 30) : 0
+                    }deg at 50% 50%, transparent 0deg, transparent 4.6deg, ${speedRayColor} 5.1deg, transparent 5.6deg, transparent 9.4deg)`,
+                    maskImage:
+                      'radial-gradient(ellipse 64% 58% at 50% 50%, transparent 60%, rgba(0,0,0,0.45) 82%, black 98%)',
+                    WebkitMaskImage:
+                      'radial-gradient(ellipse 64% 58% at 50% 50%, transparent 60%, rgba(0,0,0,0.45) 82%, black 98%)',
+                  }}
+                />
+              )}
+            </>
+          );
+        })()}
 
       {/* Sky Wind-Current Slipstream Peripheral Airflow Shimmer */}
       {hud.phase === 'flying' && hud.windCurrentIntensity > 0.12 && (
@@ -347,42 +391,57 @@ export const FlightHud: React.FC<FlightHudProps> = ({
           const isKnife = hud.maneuverKind === 'knife_edge';
           const isLoop = hud.maneuverKind === 'half_loop';
           const isDive = hud.maneuverKind === 'steep_dive';
+          const isBarrel = hud.maneuverKind === 'barrel_roll';
           const showLeft = hud.maneuverSide === -1 || hud.maneuverSide === 0;
           const showRight = hud.maneuverSide === 1 || hud.maneuverSide === 0;
-          const absBank = Math.min(90, Math.abs(hud.bankAngleDeg));
-          const titleAr = isKnife
-            ? 'طيران جانبي ٩٠°'
-            : isLoop
-              ? 'التفاف سماوي'
-              : isDive
-                ? 'انقضاض سريع'
-                : 'انعطاف حاد';
+          const absBank = isBarrel
+            ? Math.abs(hud.bankAngleDeg) % 360
+            : Math.min(90, Math.abs(hud.bankAngleDeg));
+          const titleAr = isBarrel
+            ? 'التفاف الهروب 360°'
+            : isKnife
+              ? 'طيران جانبي ٩٠°'
+              : isLoop
+                ? 'التفاف سماوي'
+                : isDive
+                  ? 'انقضاض سريع'
+                  : 'انعطاف حاد';
 
-          const accentText = isLoop
-            ? 'text-sky-300'
-            : isKnife
-              ? 'text-[#ff8c24]'
-              : 'text-amber-300';
-          const accentStroke = isLoop
-            ? '#7dd3fc'
-            : isKnife
-              ? '#ff8c24'
-              : '#fbbf24';
-          const borderTone = isLoop
-            ? 'border-sky-400/55'
-            : isKnife
-              ? 'border-[#ff8c24]/70'
-              : 'border-amber-400/55';
-          const leftGlow = isLoop
-            ? 'from-sky-400/30 via-sky-400/10 to-transparent'
-            : isKnife
-              ? 'from-[#ff8c24]/35 via-[#ff8c24]/12 to-transparent'
-              : 'from-amber-400/30 via-amber-400/10 to-transparent';
-          const rightGlow = isLoop
-            ? 'from-sky-400/30 via-sky-400/10 to-transparent'
-            : isKnife
-              ? 'from-[#ff8c24]/35 via-[#ff8c24]/12 to-transparent'
-              : 'from-amber-400/30 via-amber-400/10 to-transparent';
+          const accentText = isBarrel
+            ? 'text-cyan-300'
+            : isLoop
+              ? 'text-sky-300'
+              : isKnife
+                ? 'text-[#ff8c24]'
+                : 'text-amber-300';
+          const accentStroke = isBarrel
+            ? '#22d3ee'
+            : isLoop
+              ? '#7dd3fc'
+              : isKnife
+                ? '#ff8c24'
+                : '#fbbf24';
+          const borderTone = isBarrel
+            ? 'border-cyan-400/75'
+            : isLoop
+              ? 'border-sky-400/55'
+              : isKnife
+                ? 'border-[#ff8c24]/70'
+                : 'border-amber-400/55';
+          const leftGlow = isBarrel
+            ? 'from-cyan-400/35 via-cyan-400/12 to-transparent'
+            : isLoop
+              ? 'from-sky-400/30 via-sky-400/10 to-transparent'
+              : isKnife
+                ? 'from-[#ff8c24]/35 via-[#ff8c24]/12 to-transparent'
+                : 'from-amber-400/30 via-amber-400/10 to-transparent';
+          const rightGlow = isBarrel
+            ? 'from-cyan-400/35 via-cyan-400/12 to-transparent'
+            : isLoop
+              ? 'from-sky-400/30 via-sky-400/10 to-transparent'
+              : isKnife
+                ? 'from-[#ff8c24]/35 via-[#ff8c24]/12 to-transparent'
+                : 'from-amber-400/30 via-amber-400/10 to-transparent';
 
           const renderChevrons = (dir: 'left' | 'right' | 'up' | 'down') => {
             const rot =
@@ -701,6 +760,16 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                 )}
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={onOpenCustomize}
+              title="تخصيص مظهر التنين"
+              className="flex items-center gap-1 rounded-lg h-7 px-2 text-[11px] font-medium text-amber-200 hover:text-white hover:bg-white/10 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Palette className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              {!layout.compactTopBar && <span className="hidden sm:inline">المظهر</span>}
+            </button>
           </div>
 
           {/* Cluster 3: Camera & System Controls */}
@@ -1183,28 +1252,92 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                     })}
                   </div>
 
-                  {isReady && hud.phase === 'flying' ? (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        if (repositionMode) return;
-                        e.stopPropagation();
-                        onActivateFusion();
-                      }}
-                      title="تفعيل قدرة الاندماج (Z)"
-                      className="mt-0.5 flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-extrabold bg-amber-400 hover:bg-amber-300 text-slate-950 transition-colors whitespace-nowrap cursor-pointer"
-                    >
-                      <Zap className="w-3.5 h-3.5" />
-                      <span>تفعيل الاندماج (Z)</span>
-                    </button>
-                  ) : (
+                  {(hud.phase === 'flying' || hud.phase === 'on_foot') ? (() => {
+                    const communeOnCooldown = hud.communeCooldown > 0.05 && !hud.isCommuning;
+                    const communeReadyPct = hud.isCommuning
+                      ? 100
+                      : hud.communeCooldownMax > 0
+                        ? Math.max(
+                            0,
+                            Math.min(
+                              100,
+                              ((hud.communeCooldownMax - hud.communeCooldown) /
+                                hud.communeCooldownMax) *
+                                100,
+                            ),
+                          )
+                        : 100;
+                    const communeBtn = (compact: boolean) => (
+                      <button
+                        type="button"
+                        disabled={communeOnCooldown}
+                        onClick={(e) => {
+                          if (repositionMode) return;
+                          e.stopPropagation();
+                          onCommuneDragon();
+                        }}
+                        title="تحية وتواصل مع التنين لزيادة الرابطة الروحية (Y)"
+                        className={`relative overflow-hidden flex items-center justify-between gap-1 rounded-lg px-2 py-1 text-[10px] font-bold border transition-all whitespace-nowrap ${
+                          compact ? 'shrink-0' : 'w-full'
+                        } ${
+                          hud.isCommuning
+                            ? 'bg-amber-400/25 border-amber-300 text-amber-100 shadow-[0_0_12px_rgba(251,191,36,0.35)] cursor-pointer'
+                            : communeOnCooldown
+                              ? 'bg-white/[0.03] border-white/10 text-slate-400 cursor-not-allowed'
+                              : 'bg-sky-500/12 border-sky-400/45 text-sky-100 hover:border-amber-300 hover:bg-amber-500/15 cursor-pointer'
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="pointer-events-none absolute inset-y-0 right-0 bg-amber-400/14 transition-[width] duration-100"
+                          style={{ width: `${communeReadyPct}%` }}
+                        />
+                        <span className="relative z-10 flex items-center gap-1">
+                          <HandHeart
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              hud.isCommuning ? 'text-amber-300 animate-pulse' : 'text-amber-300'
+                            }`}
+                          />
+                          <span>{compact ? 'تحية' : 'تحية وتواصل'}</span>
+                        </span>
+                        <span className="relative z-10 font-mono-nums text-[9px] px-1 py-0.2 rounded bg-slate-950/60 border border-white/10 text-amber-200">
+                          {hud.isCommuning
+                            ? 'تواصل'
+                            : communeOnCooldown
+                              ? `${hud.communeCooldown.toFixed(1)}ث`
+                              : 'Y'}
+                        </span>
+                      </button>
+                    );
+
+                    if (isReady && hud.phase === 'flying') {
+                      return (
+                        <div className="mt-0.5 flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              if (repositionMode) return;
+                              e.stopPropagation();
+                              onActivateFusion();
+                            }}
+                            title="تفعيل قدرة الاندماج (Z)"
+                            className="flex-1 flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-[11px] font-extrabold bg-amber-400 hover:bg-amber-300 text-slate-950 transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            <Zap className="w-3.5 h-3.5 shrink-0" />
+                            <span>اندماج (Z)</span>
+                          </button>
+                          {communeBtn(true)}
+                        </div>
+                      );
+                    }
+
+                    return <div className="mt-0.5">{communeBtn(false)}</div>;
+                  })() : (
                     <div className="flex items-center justify-between text-[10px] leading-none text-slate-300 whitespace-nowrap">
                       <span>
-                        {isFused
-                          ? 'سرعة وطاقة وهجوم مضاعف'
-                          : hud.maneuverKind !== 'none'
-                            ? 'مناورة ناجحة · جاري الشحن'
-                            : 'نفّذ المناورات للشحن'}
+                        {hud.maneuverKind !== 'none'
+                          ? 'مناورة ناجحة · جاري الشحن'
+                          : 'نفّذ المناورات للشحن'}
                       </span>
                     </div>
                   )}
@@ -1678,6 +1811,66 @@ export const FlightHud: React.FC<FlightHudProps> = ({
             >
               {hud.phase === 'flying' && (
                 <div className="grid grid-cols-2 gap-1.5 w-[166px]">
+                  {(() => {
+                    const onCooldown = hud.barrelRollCooldown > 0.05 && !hud.isBarrelRolling;
+                    const lowEnergy = !hud.fusionActive && hud.energy < 12;
+                    const readyPct = hud.isBarrelRolling
+                      ? 100
+                      : hud.barrelRollCooldownMax > 0
+                        ? Math.max(
+                            0,
+                            Math.min(
+                              100,
+                              ((hud.barrelRollCooldownMax - hud.barrelRollCooldown) /
+                                hud.barrelRollCooldownMax) *
+                                100,
+                            ),
+                          )
+                        : 100;
+                    return (
+                      <button
+                        type="button"
+                        disabled={onCooldown}
+                        onClick={(e) => {
+                          if (repositionMode) return;
+                          e.stopPropagation();
+                          onTriggerBarrelRoll();
+                        }}
+                        title="التفاف الهروب 360° لتفادي الهجمات (B)"
+                        className={`relative overflow-hidden col-span-2 flex items-center justify-between gap-1.5 rounded-xl h-9 px-2.5 text-[11px] font-extrabold border transition-all whitespace-nowrap ${
+                          hud.isBarrelRolling
+                            ? 'bg-cyan-500/25 border-cyan-300 text-cyan-100 shadow-[0_0_14px_rgba(34,211,238,0.35)] cursor-pointer'
+                            : onCooldown
+                              ? 'bg-white/[0.03] border-white/10 text-slate-400 cursor-not-allowed'
+                              : lowEnergy
+                                ? 'bg-cyan-500/8 border-cyan-400/30 text-cyan-200/70 cursor-pointer'
+                                : 'bg-cyan-500/15 border-cyan-400/55 text-cyan-100 hover:border-cyan-300 hover:bg-cyan-500/25 cursor-pointer'
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="pointer-events-none absolute inset-y-0 right-0 bg-cyan-400/12 transition-[width] duration-100"
+                          style={{ width: `${readyPct}%` }}
+                        />
+                        <span className="relative z-10 flex items-center gap-1.5">
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 shrink-0 text-cyan-300 ${
+                              hud.isBarrelRolling ? 'animate-spin' : ''
+                            }`}
+                          />
+                          <span>التفاف الهروب</span>
+                        </span>
+                        <span className="relative z-10 font-mono-nums text-[10px] px-1.5 py-0.5 rounded-md bg-slate-950/60 border border-white/10 text-cyan-200">
+                          {hud.isBarrelRolling
+                            ? 'مراوغة'
+                            : onCooldown
+                              ? `${hud.barrelRollCooldown.toFixed(1)}ث`
+                              : 'B'}
+                        </span>
+                      </button>
+                    );
+                  })()}
+
                   <button
                     type="button"
                     onClick={(e) => {

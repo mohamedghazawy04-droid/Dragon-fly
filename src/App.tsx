@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { DragonCustomizeModal } from './components/DragonCustomizeModal';
 import { FlightHud } from './components/FlightHud';
 import { LoreLibraryModal } from './components/LoreLibraryModal';
 import { SanctuaryBondOverlay } from './components/SanctuaryBondOverlay';
@@ -104,6 +105,9 @@ const INITIAL_HUD: HudState = {
   lightningActive: false,
   cameraView: 'full',
   isLooping: false,
+  isBarrelRolling: false,
+  barrelRollCooldown: 0,
+  barrelRollCooldownMax: 3.2,
   knifeEdgeSide: 0,
   maneuverKind: 'none',
   maneuverSide: 0,
@@ -128,6 +132,9 @@ const INITIAL_HUD: HudState = {
   isLorePlaying: false,
   knightSpeechText: null,
   spiritualBond: 25,
+  isCommuning: false,
+  communeCooldown: 0,
+  communeCooldownMax: 6.0,
   fusionActive: false,
   fusionTimeLeft: 0,
   fusionDuration: 14,
@@ -147,6 +154,7 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [layout, setLayout] = useState<HudLayoutConfig>(() => loadSavedLayout());
   const [showUpgradesModal, setShowUpgradesModal] = useState(false);
+  const [showCustomizeModal, setShowCustomizeModal] = useState(false);
   const [showLoreModal, setShowLoreModal] = useState(false);
 
   useEffect(() => {
@@ -227,10 +235,12 @@ export default function App() {
           onSelectMode={(m) => engineRef.current?.setMode(m)}
           onSelectWarType={(wt) => engineRef.current?.setWarType(wt)}
           onOpenUpgrades={() => setShowUpgradesModal(true)}
+          onOpenCustomize={() => setShowCustomizeModal(true)}
           onOpenLore={() => setShowLoreModal(true)}
           onLaunch={() => {
             setShowLoreModal(false);
             setShowUpgradesModal(false);
+            setShowCustomizeModal(false);
             engineRef.current?.launchFlight();
           }}
         />
@@ -254,6 +264,7 @@ export default function App() {
           onToggleCameraView={() => engineRef.current?.toggleCameraView()}
           onToggleAutoCinematic={() => engineRef.current?.toggleAutoCinematic()}
           onTriggerHalfLoop={() => engineRef.current?.triggerHalfLoop()}
+          onTriggerBarrelRoll={() => engineRef.current?.triggerBarrelRoll()}
           onToggleKnifeEdge={() => engineRef.current?.toggleKnifeEdge()}
           onSkydive={() => engineRef.current?.jumpOffDragon()}
           onRecallDragon={() => engineRef.current?.recallDragon()}
@@ -270,8 +281,10 @@ export default function App() {
           onFlyLandmark={(id) => engineRef.current?.flyToLandmark(id)}
           onRequestPointerLock={() => engineRef.current?.requestPointerLock()}
           onOpenUpgrades={() => setShowUpgradesModal(true)}
+          onOpenCustomize={() => setShowCustomizeModal(true)}
           onStartNewWar={() => engineRef.current?.startNewWarWave()}
           onActivateFusion={() => engineRef.current?.activateFusion()}
+          onCommuneDragon={() => engineRef.current?.communeWithDragon()}
           onDismissFlightTip={() => engineRef.current?.dismissFlightTip()}
         />
       )}
@@ -287,10 +300,12 @@ export default function App() {
           onSelectMode={(m) => engineRef.current?.setMode(m)}
           onSelectWarType={(wt) => engineRef.current?.setWarType(wt)}
           onOpenUpgrades={() => setShowUpgradesModal(true)}
+          onOpenCustomize={() => setShowCustomizeModal(true)}
           onOpenLore={() => setShowLoreModal(true)}
           onTakeOff={() => {
             setShowLoreModal(false);
             setShowUpgradesModal(false);
+            setShowCustomizeModal(false);
             engineRef.current?.launchFlight();
           }}
         />
@@ -304,7 +319,25 @@ export default function App() {
           onUpgradeDragon={(k) => engineRef.current?.upgradeDragon(k)}
           onSaveProgression={() => engineRef.current?.saveProgression()}
           onResetProgression={() => engineRef.current?.resetProgression()}
+          onOpenCustomize={() => {
+            setShowUpgradesModal(false);
+            setShowCustomizeModal(true);
+          }}
           onClose={() => setShowUpgradesModal(false)}
+        />
+      )}
+
+      {showCustomizeModal && (
+        <DragonCustomizeModal
+          hud={hud}
+          onSelectDragon={(id) => engineRef.current?.selectDragon(id)}
+          onChangeAppearance={(patch) => engineRef.current?.setDragonAppearance(patch)}
+          onResetAppearance={() => engineRef.current?.resetDragonAppearance()}
+          onOpenUpgrades={() => {
+            setShowCustomizeModal(false);
+            setShowUpgradesModal(true);
+          }}
+          onClose={() => setShowCustomizeModal(false)}
         />
       )}
 

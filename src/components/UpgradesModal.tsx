@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Check,
   Flame,
+  Palette,
   Plus,
   RotateCcw,
   Save,
@@ -28,6 +29,7 @@ interface UpgradesModalProps {
   onUpgradeDragon: (key: DragonUpgradeKey) => void;
   onSaveProgression: () => void;
   onResetProgression: () => void;
+  onOpenCustomize: () => void;
   onClose: () => void;
 }
 
@@ -90,6 +92,7 @@ export const UpgradesModal: React.FC<UpgradesModalProps> = ({
   onUpgradeDragon,
   onSaveProgression,
   onResetProgression,
+  onOpenCustomize,
   onClose,
 }) => {
   const [justSaved, setJustSaved] = useState(false);
@@ -141,14 +144,25 @@ export const UpgradesModal: React.FC<UpgradesModalProps> = ({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="إغلاق"
-            className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onOpenCustomize}
+              className="flex items-center gap-1.5 rounded-xl h-9 px-3.5 text-xs font-bold bg-amber-500/18 hover:bg-amber-500/28 text-amber-200 border border-amber-400/35 transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <Palette className="w-3.5 h-3.5 text-amber-300" />
+              <span>تخصيص المظهر</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="إغلاق"
+              className="flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* War Target Selector */}
@@ -251,7 +265,7 @@ export const UpgradesModal: React.FC<UpgradesModalProps> = ({
           {/* Dragon Upgrades */}
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between text-sm font-bold text-orange-300 border-b border-white/10 pb-2">
-              <span>تطويرات التنين</span>
+              <span>تطويرات التنين · تفتح المظاهر</span>
               <span className="font-mono-nums text-xs">
                 متاح: {progression.dragonPoints} نقطة
               </span>

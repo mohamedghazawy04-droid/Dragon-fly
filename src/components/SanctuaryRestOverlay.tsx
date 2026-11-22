@@ -8,6 +8,7 @@ import {
   Maximize2,
   Minimize2,
   Mountain,
+  Palette,
   Shield,
   Ship,
   Snowflake,
@@ -34,6 +35,7 @@ interface SanctuaryRestOverlayProps {
   onSelectMode: (mode: GameMode) => void;
   onSelectWarType: (warType: WarTargetType) => void;
   onOpenUpgrades: () => void;
+  onOpenCustomize: () => void;
   onOpenLore: () => void;
   onTakeOff: () => void;
 }
@@ -48,6 +50,7 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
   onSelectMode,
   onSelectWarType,
   onOpenUpgrades,
+  onOpenCustomize,
   onOpenLore,
   onTakeOff,
 }) => {
@@ -152,6 +155,15 @@ export const SanctuaryRestOverlay: React.FC<SanctuaryRestOverlayProps> = ({
                   +{totalPoints}
                 </span>
               )}
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenCustomize}
+              className="flex items-center gap-1.5 rounded-xl bg-white/5 hover:bg-white/10 h-9 px-3 text-xs font-medium text-amber-200 border border-white/12 transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <Palette className="w-3.5 h-3.5 text-amber-300" />
+              <span>المظهر</span>
             </button>
 
             <button

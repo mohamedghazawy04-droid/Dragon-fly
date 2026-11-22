@@ -4,7 +4,12 @@ import {
   createDragonScaleMaps,
   createDragonWingMembraneMaps,
 } from './textures';
-import { DragonSpec } from './types';
+import {
+  DRAGON_SCALE_PRESETS,
+  DRAGON_WING_PRESETS,
+  DragonAppearanceConfig,
+  DragonSpec,
+} from './types';
 
 export interface DragonRig {
   root: THREE.Group;
@@ -478,18 +483,37 @@ export function createDragonRig(
   maxAnisotropy: number,
   isPlayer: boolean,
   team: 'ally' | 'enemy' = 'ally',
+  appearance?: DragonAppearanceConfig,
+  scalesUpgradeLevel = 0,
 ): DragonRig {
   const root = new THREE.Group();
   const bodyGroup = new THREE.Group();
   root.add(bodyGroup);
 
+  const scalePreset = appearance
+    ? DRAGON_SCALE_PRESETS.find((p) => p.id === appearance.scalePalette)
+    : undefined;
+  const wingPreset = appearance
+    ? DRAGON_WING_PRESETS.find((p) => p.id === appearance.wingStyle)
+    : undefined;
+  const hornStyle = appearance?.hornStyle ?? 'classic';
+
+  const effectivePrimaryColor = scalePreset?.primaryColor ?? spec.primaryColor;
+  const effectiveSecondaryColor = scalePreset?.secondaryColor ?? spec.secondaryColor;
+  const effectiveBellyColor = scalePreset?.bellyColor ?? spec.bellyColor;
+  const effectiveMembraneColor = wingPreset?.membraneColor ?? spec.membraneColor;
+  const effectiveEyeColor = wingPreset?.eyeColor ?? spec.eyeColor;
+  const baseMembraneEmissive = wingPreset?.emissiveTint ?? 0x000000;
+  const baseMembraneEmissiveInt = wingPreset?.emissiveIntensity ?? 0;
+  const iridescenceBoost = (scalePreset?.iridescenceBoost ?? 0) + scalesUpgradeLevel * 0.04;
+
   const scaleMaps = createDragonScaleMaps(
-    spec.primaryColor,
-    spec.secondaryColor,
+    effectivePrimaryColor,
+    effectiveSecondaryColor,
     maxAnisotropy,
   );
-  const wingMaps = createDragonWingMembraneMaps(spec.membraneColor, maxAnisotropy);
-  const eyeTex = createDragonEyeTexture(spec.eyeColor, maxAnisotropy);
+  const wingMaps = createDragonWingMembraneMaps(effectiveMembraneColor, maxAnisotropy);
+  const eyeTex = createDragonEyeTexture(effectiveEyeColor, maxAnisotropy);
 
   const lightningUniforms = {
     uLightningReflect: { value: 0 },
@@ -661,28 +685,28 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
     normalMap: scaleMaps.normalMap,
     normalScale: new THREE.Vector2(1.65, 1.65),
     roughnessMap: scaleMaps.roughnessMap,
-    roughness: 0.68,
-    metalness: 0.18,
-    clearcoat: 0.34,
-    clearcoatRoughness: 0.32,
-    iridescence: 0.26,
+    roughness: Math.max(0.45, 0.68 - scalesUpgradeLevel * 0.03),
+    metalness: Math.min(0.42, 0.18 + scalesUpgradeLevel * 0.04),
+    clearcoat: Math.min(0.75, 0.34 + scalesUpgradeLevel * 0.05),
+    clearcoatRoughness: Math.max(0.16, 0.32 - scalesUpgradeLevel * 0.025),
+    iridescence: Math.min(0.9, 0.26 + iridescenceBoost),
     iridescenceIOR: 1.38,
   });
   applyLightningReflectionShader(primaryMat, 1.0);
 
   const armorMat = new THREE.MeshPhysicalMaterial({
-    color: spec.secondaryColor,
+    color: effectiveSecondaryColor,
     normalMap: scaleMaps.normalMap,
     normalScale: new THREE.Vector2(0.85, 0.85),
-    roughness: 0.26,
-    metalness: 0.74,
-    clearcoat: 0.4,
+    roughness: Math.max(0.16, 0.26 - scalesUpgradeLevel * 0.015),
+    metalness: Math.min(0.92, 0.74 + scalesUpgradeLevel * 0.03),
+    clearcoat: Math.min(0.85, 0.4 + scalesUpgradeLevel * 0.05),
     clearcoatRoughness: 0.24,
   });
   applyLightningReflectionShader(armorMat, 1.25);
 
   const bellyMat = new THREE.MeshPhysicalMaterial({
-    color: spec.bellyColor,
+    color: effectiveBellyColor,
     normalMap: scaleMaps.normalMap,
     normalScale: new THREE.Vector2(1.0, 1.0),
     roughness: 0.58,
@@ -697,11 +721,13 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
     normalMap: wingMaps.normalMap,
     normalScale: new THREE.Vector2(0.75, 0.75),
     roughnessMap: wingMaps.roughnessMap,
+    emissive: baseMembraneEmissive,
+    emissiveIntensity: baseMembraneEmissiveInt,
     roughness: 0.52,
     metalness: 0.04,
     sheen: 0.45,
     sheenRoughness: 0.6,
-    sheenColor: new THREE.Color(spec.membraneColor),
+    sheenColor: new THREE.Color(effectiveMembraneColor),
     clearcoat: 0.24,
     clearcoatRoughness: 0.48,
     side: THREE.DoubleSide,
@@ -712,7 +738,7 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
 
   const eyeMat = new THREE.MeshStandardMaterial({
     map: eyeTex,
-    emissive: spec.eyeColor,
+    emissive: effectiveEyeColor,
     emissiveMap: eyeTex,
     emissiveIntensity: 1.65,
     roughness: 0.08,
@@ -1322,54 +1348,243 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
     headGroup.add(nostril);
   });
 
-  const nasalHorn = new THREE.Mesh(createDorsalSpineGeometry(0.72, 0.42), armorMat);
-  nasalHorn.position.set(0, 0.5, -2.25);
-  headGroup.add(nasalHorn);
+  // Custom Horn & Nasal Crest Silhouettes (5 distinct 3D geometry styles)
+  if (hornStyle === 'forward_spear') {
+    const longNasal = new THREE.Mesh(createDorsalSpineGeometry(0.95, 0.62), armorMat);
+    longNasal.position.set(0, 0.52, -2.36);
+    longNasal.rotation.x = 0.26;
+    headGroup.add(longNasal);
 
-  // Swept-Back Tapered Crown Horns
-  const hornLGeo = createTaperedHornGeometry(
-    [
-      new THREE.Vector3(-0.48, 0.52, -0.15),
-      new THREE.Vector3(-0.88, 1.18, 0.85),
-      new THREE.Vector3(-1.26, 1.62, 2.25),
-      new THREE.Vector3(-1.42, 1.52, 3.05),
-    ],
-    0.26,
-    0.03,
-  );
-  const hornL = new THREE.Mesh(hornLGeo, armorMat);
-  hornL.castShadow = true;
-  headGroup.add(hornL);
+    [-1, 1].forEach((side) => {
+      const spearGeo = createTaperedHornGeometry(
+        [
+          new THREE.Vector3(side * 0.48, 0.48, -0.25),
+          new THREE.Vector3(side * 0.76, 0.86, -1.15),
+          new THREE.Vector3(side * 0.92, 1.02, -2.18),
+          new THREE.Vector3(side * 0.82, 1.12, -2.92),
+        ],
+        0.24,
+        0.025,
+      );
+      const spear = new THREE.Mesh(spearGeo, armorMat);
+      spear.castShadow = true;
+      headGroup.add(spear);
 
-  const hornRGeo = createTaperedHornGeometry(
-    [
-      new THREE.Vector3(0.48, 0.52, -0.15),
-      new THREE.Vector3(0.88, 1.18, 0.85),
-      new THREE.Vector3(1.26, 1.62, 2.25),
-      new THREE.Vector3(1.42, 1.52, 3.05),
-    ],
-    0.26,
-    0.03,
-  );
-  const hornR = new THREE.Mesh(hornRGeo, armorMat);
-  hornR.castShadow = true;
-  headGroup.add(hornR);
+      const cheekBlade = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.64, 0.12, 0.05),
+            new THREE.Vector3(side * 0.98, 0.28, -0.55),
+            new THREE.Vector3(side * 1.12, 0.36, -1.25),
+          ],
+          0.14,
+          0.02,
+          10,
+          6,
+        ),
+        armorMat,
+      );
+      headGroup.add(cheekBlade);
+    });
+  } else if (hornStyle === 'curved_ram') {
+    const nasalKnob = new THREE.Mesh(createDorsalSpineGeometry(0.56, 0.36), armorMat);
+    nasalKnob.position.set(0, 0.48, -2.22);
+    headGroup.add(nasalKnob);
 
-  // Secondary lower temple horns
-  [-1, 1].forEach((side) => {
-    const subHornGeo = createTaperedHornGeometry(
+    [-1, 1].forEach((side) => {
+      const ramGeo = createTaperedHornGeometry(
+        [
+          new THREE.Vector3(side * 0.46, 0.55, -0.15),
+          new THREE.Vector3(side * 1.15, 0.98, 0.45),
+          new THREE.Vector3(side * 1.62, 0.42, 0.88),
+          new THREE.Vector3(side * 1.54, -0.35, 0.32),
+          new THREE.Vector3(side * 1.24, -0.44, -0.55),
+          new THREE.Vector3(side * 1.08, -0.05, -1.02),
+        ],
+        0.29,
+        0.04,
+        24,
+        10,
+      );
+      const ramHorn = new THREE.Mesh(ramGeo, armorMat);
+      ramHorn.castShadow = true;
+      headGroup.add(ramHorn);
+
+      const browCap = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.16, 0.72), armorMat);
+      browCap.position.set(side * 0.52, 0.54, -0.65);
+      browCap.rotation.z = side * -0.28;
+      headGroup.add(browCap);
+    });
+  } else if (hornStyle === 'split_crown') {
+    const twinNasal = new THREE.Mesh(createDorsalSpineGeometry(0.84, 0.48), armorMat);
+    twinNasal.position.set(0, 0.53, -2.25);
+    headGroup.add(twinNasal);
+
+    [-1, 1].forEach((side) => {
+      const upperCrown = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.44, 0.54, -0.18),
+            new THREE.Vector3(side * 0.82, 1.38, 0.65),
+            new THREE.Vector3(side * 1.15, 1.98, 1.85),
+            new THREE.Vector3(side * 1.22, 2.15, 2.65),
+          ],
+          0.25,
+          0.025,
+        ),
+        armorMat,
+      );
+      upperCrown.castShadow = true;
+      headGroup.add(upperCrown);
+
+      const forkSpike = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.64, 0.92, 0.25),
+            new THREE.Vector3(side * 1.08, 1.28, -0.15),
+            new THREE.Vector3(side * 1.38, 1.56, -0.52),
+          ],
+          0.16,
+          0.02,
+          12,
+          7,
+        ),
+        armorMat,
+      );
+      headGroup.add(forkSpike);
+
+      const lowerSplit = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.62, 0.18, 0.04),
+            new THREE.Vector3(side * 1.12, 0.42, 0.95),
+            new THREE.Vector3(side * 1.48, 0.66, 1.92),
+          ],
+          0.17,
+          0.02,
+          12,
+          7,
+        ),
+        armorMat,
+      );
+      headGroup.add(lowerSplit);
+    });
+  } else if (hornStyle === 'ancient_halo') {
+    for (let n = 0; n < 3; n++) {
+      const ridge = new THREE.Mesh(
+        createDorsalSpineGeometry(0.68 - n * 0.12, 0.44 - n * 0.06),
+        armorMat,
+      );
+      ridge.position.set(0, 0.48 + n * 0.08, -2.28 + n * 0.48);
+      headGroup.add(ridge);
+    }
+
+    [-1, 1].forEach((side) => {
+      const mainHalo = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.48, 0.56, -0.15),
+            new THREE.Vector3(side * 1.08, 1.42, 0.65),
+            new THREE.Vector3(side * 1.56, 2.08, 1.62),
+            new THREE.Vector3(side * 1.44, 2.48, 2.55),
+          ],
+          0.28,
+          0.03,
+          20,
+          9,
+        ),
+        armorMat,
+      );
+      mainHalo.castShadow = true;
+      headGroup.add(mainHalo);
+
+      const innerCrown = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.28, 0.62, -0.12),
+            new THREE.Vector3(side * 0.52, 1.48, 0.48),
+            new THREE.Vector3(side * 0.64, 2.15, 1.15),
+          ],
+          0.15,
+          0.02,
+          12,
+          7,
+        ),
+        armorMat,
+      );
+      headGroup.add(innerCrown);
+
+      const lowerSwept = new THREE.Mesh(
+        createTaperedHornGeometry(
+          [
+            new THREE.Vector3(side * 0.65, 0.14, 0.08),
+            new THREE.Vector3(side * 1.28, 0.32, 0.96),
+            new THREE.Vector3(side * 1.72, 0.64, 1.88),
+          ],
+          0.18,
+          0.022,
+          12,
+          7,
+        ),
+        armorMat,
+      );
+      headGroup.add(lowerSwept);
+
+      const hornRing = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.055, 6, 12), hiltMat);
+      hornRing.position.set(side * 0.72, 0.92, 0.16);
+      hornRing.rotation.set(0.75, side * 0.45, 0);
+      headGroup.add(hornRing);
+    });
+  } else {
+    const nasalHorn = new THREE.Mesh(createDorsalSpineGeometry(0.72, 0.42), armorMat);
+    nasalHorn.position.set(0, 0.5, -2.25);
+    headGroup.add(nasalHorn);
+
+    // Classic Swept-Back Tapered Crown Horns
+    const hornLGeo = createTaperedHornGeometry(
       [
-        new THREE.Vector3(side * 0.62, 0.15, 0.05),
-        new THREE.Vector3(side * 1.05, 0.35, 0.95),
-        new THREE.Vector3(side * 1.32, 0.48, 1.65),
+        new THREE.Vector3(-0.48, 0.52, -0.15),
+        new THREE.Vector3(-0.88, 1.18, 0.85),
+        new THREE.Vector3(-1.26, 1.62, 2.25),
+        new THREE.Vector3(-1.42, 1.52, 3.05),
       ],
-      0.16,
-      0.02,
-      10,
-      6,
+      0.26,
+      0.03,
     );
-    headGroup.add(new THREE.Mesh(subHornGeo, armorMat));
-  });
+    const hornL = new THREE.Mesh(hornLGeo, armorMat);
+    hornL.castShadow = true;
+    headGroup.add(hornL);
+
+    const hornRGeo = createTaperedHornGeometry(
+      [
+        new THREE.Vector3(0.48, 0.52, -0.15),
+        new THREE.Vector3(0.88, 1.18, 0.85),
+        new THREE.Vector3(1.26, 1.62, 2.25),
+        new THREE.Vector3(1.42, 1.52, 3.05),
+      ],
+      0.26,
+      0.03,
+    );
+    const hornR = new THREE.Mesh(hornRGeo, armorMat);
+    hornR.castShadow = true;
+    headGroup.add(hornR);
+
+    // Secondary lower temple horns
+    [-1, 1].forEach((side) => {
+      const subHornGeo = createTaperedHornGeometry(
+        [
+          new THREE.Vector3(side * 0.62, 0.15, 0.05),
+          new THREE.Vector3(side * 1.05, 0.35, 0.95),
+          new THREE.Vector3(side * 1.32, 0.48, 1.65),
+        ],
+        0.16,
+        0.02,
+        10,
+        6,
+      );
+      headGroup.add(new THREE.Mesh(subHornGeo, armorMat));
+    });
+  }
 
   // Vertical Slit-Pupil Reptilian Eyes
   const eyeGeo = new THREE.SphereGeometry(0.18, 14, 14);
@@ -1584,7 +1799,7 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
     parentTail = seg;
   }
 
-  const auraLight = new THREE.PointLight(spec.eyeColor, isPlayer ? 1.8 : 1.0, 24, 1.6);
+  const auraLight = new THREE.PointLight(effectiveEyeColor, isPlayer ? 1.8 : 1.0, 24, 1.6);
   auraLight.position.set(0, 1.2, -3.5);
   bodyGroup.add(auraLight);
 
@@ -1602,8 +1817,8 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
     } else {
       primaryMat.emissive.setHex(0x000000);
       primaryMat.emissiveIntensity = 0;
-      membraneMat.emissive.setHex(0x000000);
-      membraneMat.emissiveIntensity = 0;
+      membraneMat.emissive.setHex(baseMembraneEmissive);
+      membraneMat.emissiveIntensity = baseMembraneEmissiveInt;
       armorMat.emissive.setHex(0x000000);
       armorMat.emissiveIntensity = 0;
     }
@@ -1662,7 +1877,7 @@ void evalDragonDamageScars(vec3 p, float sev, float tSec, out float charMask, ou
       lightningUniforms.uFusionColor.value.setHex(colorHex);
       auraLight.color.setHex(colorHex);
     } else {
-      auraLight.color.setHex(spec.eyeColor);
+      auraLight.color.setHex(effectiveEyeColor);
     }
     const baseAura = isPlayer ? 1.8 : 1.0;
     auraLight.intensity = baseAura + clamped * 4.2;

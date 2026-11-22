@@ -22,16 +22,25 @@ import {
 import {
   ANCIENT_LORE_TALES,
   CameraView,
+  DEFAULT_DRAGON_APPEARANCE_BY_ID,
   DEFAULT_PROGRESSION,
+  DRAGON_HORN_PRESETS,
+  DRAGON_SCALE_PRESETS,
   DRAGON_SPECS,
+  DRAGON_WING_PRESETS,
+  DragonAppearanceConfig,
+  DragonHornStyleId,
   DragonId,
+  DragonScalePaletteId,
   DragonUpgradeKey,
+  DragonWingStyleId,
   ElementType,
   EnemyIndicator,
   FlightTip,
   GameMode,
   GamePhase,
   HudState,
+  isAppearanceUnlocked,
   KnightUpgradeKey,
   LandmarkInfo,
   ManeuverKind,
@@ -250,6 +259,14 @@ interface VfxShockRing {
 
 const PROGRESS_STORAGE_KEY = 'dragon_knight_progress_v1';
 
+function createDefaultAppearanceMap(): Record<DragonId, DragonAppearanceConfig> {
+  return {
+    ignis: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID.ignis },
+    glacius: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID.glacius },
+    terra: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID.terra },
+  };
+}
+
 function loadSavedProgression(): ProgressionState {
   try {
     const raw = window.localStorage.getItem(PROGRESS_STORAGE_KEY);
@@ -258,6 +275,7 @@ function loadSavedProgression(): ProgressionState {
         ...DEFAULT_PROGRESSION,
         knightUpgrades: { ...DEFAULT_PROGRESSION.knightUpgrades },
         dragonUpgrades: { ...DEFAULT_PROGRESSION.dragonUpgrades },
+        dragonAppearance: createDefaultAppearanceMap(),
       };
     }
     const parsed = JSON.parse(raw) as Partial<ProgressionState>;
@@ -270,7 +288,7 @@ function loadSavedProgression(): ProgressionState {
         ? Math.max(minVal, Math.floor(val))
         : fallback;
 
-    return {
+    const baseProgression: ProgressionState = {
       knightPoints: clampInt(parsed.knightPoints, DEFAULT_PROGRESSION.knightPoints),
       dragonPoints: clampInt(parsed.dragonPoints, DEFAULT_PROGRESSION.dragonPoints),
       warsWon: clampInt(parsed.warsWon, 0),
@@ -285,17 +303,46 @@ function loadSavedProgression(): ProgressionState {
         scales: clampLvl(parsed.dragonUpgrades?.scales),
         wings: clampLvl(parsed.dragonUpgrades?.wings),
       },
+      dragonAppearance: createDefaultAppearanceMap(),
       loreElapsedSeconds: clampInt(parsed.loreElapsedSeconds, 0),
       savedAt:
         typeof parsed.savedAt === 'number' && Number.isFinite(parsed.savedAt)
           ? parsed.savedAt
           : null,
     };
+
+    const rawApp = parsed.dragonAppearance as Partial<
+      Record<DragonId, Partial<DragonAppearanceConfig>>
+    > | undefined;
+    for (const dId of ['ignis', 'glacius', 'terra'] as DragonId[]) {
+      const entry = rawApp?.[dId];
+      if (!entry) continue;
+      const sPreset = DRAGON_SCALE_PRESETS.find((p) => p.id === entry.scalePalette);
+      const hPreset = DRAGON_HORN_PRESETS.find((p) => p.id === entry.hornStyle);
+      const wPreset = DRAGON_WING_PRESETS.find((p) => p.id === entry.wingStyle);
+      baseProgression.dragonAppearance[dId] = {
+        scalePalette:
+          sPreset && isAppearanceUnlocked(sPreset.unlock, baseProgression)
+            ? (sPreset.id as DragonScalePaletteId)
+            : 'default',
+        hornStyle:
+          hPreset && isAppearanceUnlocked(hPreset.unlock, baseProgression)
+            ? (hPreset.id as DragonHornStyleId)
+            : 'classic',
+        wingStyle:
+          wPreset && isAppearanceUnlocked(wPreset.unlock, baseProgression)
+            ? (wPreset.id as DragonWingStyleId)
+            : 'natural',
+      };
+    }
+
+    return baseProgression;
   } catch {
     return {
       ...DEFAULT_PROGRESSION,
       knightUpgrades: { ...DEFAULT_PROGRESSION.knightUpgrades },
       dragonUpgrades: { ...DEFAULT_PROGRESSION.dragonUpgrades },
+      dragonAppearance: createDefaultAppearanceMap(),
     };
   }
 }
@@ -308,6 +355,8 @@ const UE5FilmicPostShader = {
     motionBlur: { value: 0.0 },
     boostFactor: { value: 0.0 },
     steerSmear: { value: 0.0 },
+    diveGlow: { value: 0.0 },
+    barrelSwirl: { value: 0.0 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -323,20 +372,22 @@ const UE5FilmicPostShader = {
     uniform float motionBlur;
     uniform float boostFactor;
     uniform float steerSmear;
+    uniform float diveGlow;
+    uniform float barrelSwirl;
     varying vec2 vUv;
     void main() {
       vec2 center = vUv - 0.5;
       float rad = length(center);
       vec4 centerTex = texture2D(tDiffuse, vUv);
       vec3 col = centerTex.rgb;
+      float edgeMask = smoothstep(0.11, 0.56, rad);
 
       if (motionBlur > 0.004) {
         // Keep central focal zone razor-sharp around dragon & reticle while edges streak with speed
-        float edgeMask = smoothstep(0.11, 0.56, rad);
-        float blurAmt = motionBlur * edgeMask * (0.022 + 0.018 * boostFactor);
+        float blurAmt = motionBlur * edgeMask * (0.024 + 0.020 * boostFactor + 0.018 * diveGlow);
         vec2 radialDir = rad > 0.0001 ? (center / rad) : vec2(0.0);
-        vec2 tangDir = vec2(-radialDir.y, radialDir.x) * (steerSmear * 0.34);
-        vec2 stepVec = (radialDir * (0.45 + rad * 1.15) + tangDir) * blurAmt;
+        vec2 tangDir = vec2(-radialDir.y, radialDir.x) * (steerSmear * 0.34 + barrelSwirl * 0.62);
+        vec2 stepVec = (radialDir * (0.45 + rad * 1.18) + tangDir) * blurAmt;
 
         vec3 acc = vec3(0.0);
         float totalW = 0.0;
@@ -349,14 +400,23 @@ const UE5FilmicPostShader = {
         }
         col = acc / totalW;
 
-        // Subtle peripheral chromatic velocity fringe during boost & Mach dives
-        float chroma = edgeMask * motionBlur * (0.0014 + 0.0024 * boostFactor);
+        // Peripheral chromatic velocity fringe during boost, max-speed dives & Barrel Roll
+        float chroma = edgeMask * motionBlur * (0.0016 + 0.0026 * boostFactor + 0.0022 * diveGlow);
         if (chroma > 0.0002) {
           float rCh = texture2D(tDiffuse, clamp(vUv - stepVec * 0.45 - radialDir * chroma, vec2(0.001), vec2(0.999))).r;
           float bCh = texture2D(tDiffuse, clamp(vUv - stepVec * 0.15 + radialDir * chroma, vec2(0.001), vec2(0.999))).b;
-          col.r = mix(col.r, rCh, 0.48);
-          col.b = mix(col.b, bCh, 0.48);
+          col.r = mix(col.r, rCh, 0.52);
+          col.b = mix(col.b, bCh, 0.52);
         }
+      }
+
+      if (diveGlow > 0.01) {
+        vec3 glowCol = mix(
+          vec3(1.0, 0.72, 0.32),
+          vec3(0.24, 0.88, 1.0),
+          clamp(abs(barrelSwirl) * 1.35, 0.0, 1.0)
+        );
+        col += glowCol * edgeMask * diveGlow * 0.14;
       }
 
       col = clamp((col - 0.5) * contrastBoost + 0.5, 0.0, 1.0);
@@ -444,6 +504,14 @@ export class DragonEngine {
   private playerCrashing = false;
   private playerCrashTimer = 0;
   private knifeEdgeSide: -1 | 0 | 1 = 0;
+  private barrelRollTimer = 0;
+  private readonly barrelRollDuration = 0.62;
+  private barrelRollDir: -1 | 1 = 1;
+  private barrelRollStartRoll = 0;
+  private barrelRollCooldown = 0;
+  private readonly barrelRollCooldownMax = 3.2;
+  private barrelRollEvadedThisRoll = false;
+  private barrelRollTrailTimer = 0;
   private prevTurnInput = 0;
   private maneuverKind: ManeuverKind = 'none';
   private maneuverSide: -1 | 0 | 1 = 0;
@@ -505,6 +573,10 @@ export class DragonEngine {
   private divePullupCooldown = 0;
   private fusionParticleTimer = 0;
   private bondReadyAnnounced = false;
+  private communeTimer = 0;
+  private readonly communeDuration = 1.25;
+  private communeCooldown = 0;
+  private readonly communeCooldownMax = 6.0;
   private woundsCount = 0;
   private playerScarSeverity = 0;
   private woundEmberTimer = 0;
@@ -573,10 +645,12 @@ export class DragonEngine {
   private sanctuaryOrbitAngle = 0.6;
   private motionBlurIntensity = 0;
   private boostVisualFactor = 0;
+  private diveGlowFactor = 0;
+  private barrelVisualFactor = 0;
   private speedStreakLines!: THREE.LineSegments;
   private speedStreakMat!: THREE.LineBasicMaterial;
   private speedStreakSeeds!: Float32Array;
-  private readonly speedStreakCount = 72;
+  private readonly speedStreakCount = 110;
   private windCurrentIntensity = 0;
   private windCurrentBoostTimer = 0;
   private windWingTrailTimer = 0;
@@ -899,7 +973,14 @@ export class DragonEngine {
     this.updateOceanReflection();
 
     // 6. Player Dragon Rig & Articulated Dismounted Knight Rig
-    this.playerRig = createDragonRig(DRAGON_SPECS[this.dragonId], this.maxAnisotropy, true);
+    this.playerRig = createDragonRig(
+      DRAGON_SPECS[this.dragonId],
+      this.maxAnisotropy,
+      true,
+      'ally',
+      this.progression.dragonAppearance[this.dragonId],
+      this.progression.dragonUpgrades.scales,
+    );
     this.scene.add(this.playerRig.root);
     this.activeRiderRig = createArticulatedRiderRig();
     this.activeRiderRig.root.visible = false;
@@ -985,9 +1066,9 @@ export class DragonEngine {
     this.speedStreakSeeds = new Float32Array(this.speedStreakCount * 4);
     for (let i = 0; i < this.speedStreakCount; i++) {
       this.speedStreakSeeds[i * 4] = (i / this.speedStreakCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.14;
-      this.speedStreakSeeds[i * 4 + 1] = 8.5 + Math.random() * 14.5; // radial ring radius
+      this.speedStreakSeeds[i * 4 + 1] = 7.5 + Math.random() * 15.5; // radial ring radius
       this.speedStreakSeeds[i * 4 + 2] = Math.random(); // depth phase 0..1
-      this.speedStreakSeeds[i * 4 + 3] = 0.78 + Math.random() * 0.55; // speed multiplier
+      this.speedStreakSeeds[i * 4 + 3] = 0.78 + Math.random() * 0.6; // speed multiplier
     }
     const streakGeo = new THREE.BufferGeometry();
     streakGeo.setAttribute('position', new THREE.BufferAttribute(streakPositions, 3));
@@ -1152,8 +1233,10 @@ export class DragonEngine {
       if (e.code === 'KeyV') this.toggleCameraView();
       if (e.code === 'KeyO') this.toggleAutoCinematic();
       if (e.code === 'KeyX') this.triggerHalfLoop();
+      if (e.code === 'KeyB') this.triggerBarrelRoll();
       if (e.code === 'KeyK') this.toggleKnifeEdge();
       if (e.code === 'KeyZ') this.activateFusion();
+      if (e.code === 'KeyY') this.communeWithDragon();
       if (e.code === 'KeyG') this.landDragon();
       if (e.code === 'KeyU') this.jumpOffDragon();
       if (e.code === 'KeyJ') this.isFiring = true;
@@ -1170,6 +1253,9 @@ export class DragonEngine {
     } else if (this.phase === 'on_foot') {
       if (e.code === 'KeyG') {
         this.remountDragon();
+      }
+      if (e.code === 'KeyY') {
+        this.communeWithDragon();
       }
       if (e.code === 'KeyF' || e.code === 'KeyJ') {
         this.performSwordSlash();
@@ -1333,7 +1419,14 @@ export class DragonEngine {
 
     this.scene.remove(this.playerRig.root);
     this.playerRig.dispose();
-    this.playerRig = createDragonRig(spec, this.maxAnisotropy, true);
+    this.playerRig = createDragonRig(
+      spec,
+      this.maxAnisotropy,
+      true,
+      'ally',
+      this.progression.dragonAppearance[id],
+      this.progression.dragonUpgrades.scales,
+    );
     this.scene.add(this.playerRig.root);
     this.applyUpgradeStats(true);
 
@@ -1419,6 +1512,106 @@ export class DragonEngine {
     this.emitHud();
   }
 
+  private countUnlockedAppearances(): number {
+    return (
+      DRAGON_SCALE_PRESETS.filter((p) => isAppearanceUnlocked(p.unlock, this.progression)).length +
+      DRAGON_HORN_PRESETS.filter((p) => isAppearanceUnlocked(p.unlock, this.progression)).length +
+      DRAGON_WING_PRESETS.filter((p) => isAppearanceUnlocked(p.unlock, this.progression)).length
+    );
+  }
+
+  private rebuildPlayerRigWithAppearance(refillVitals = false): void {
+    const prevPos = this.playerRig.root.position.clone();
+    const prevQuat = this.playerRig.root.quaternion.clone();
+    const prevScale = this.playerRig.root.scale.clone();
+    const prevVisible = this.playerRig.root.visible;
+    const prevRiderVisible = this.playerRig.riderBodyGroup.visible;
+    const prevLeftHandVisible = this.playerRig.leftHandGroup.visible;
+    const prevSwordArmVisible = this.playerRig.swordArmGroup.visible;
+    const prevReinLVisible = this.playerRig.leftReinStrap.visible;
+    const prevReinRVisible = this.playerRig.rightReinStrap.visible;
+
+    this.scene.remove(this.playerRig.root);
+    this.playerRig.dispose();
+    this.playerRig = createDragonRig(
+      DRAGON_SPECS[this.dragonId],
+      this.maxAnisotropy,
+      true,
+      'ally',
+      this.progression.dragonAppearance[this.dragonId],
+      this.progression.dragonUpgrades.scales,
+    );
+    this.playerRig.root.position.copy(prevPos);
+    this.playerRig.root.quaternion.copy(prevQuat);
+    this.playerRig.root.scale.copy(prevScale);
+    this.playerRig.root.visible = prevVisible;
+    this.playerRig.riderBodyGroup.visible = prevRiderVisible;
+    this.playerRig.leftHandGroup.visible = prevLeftHandVisible;
+    this.playerRig.swordArmGroup.visible = prevSwordArmVisible;
+    this.playerRig.leftReinStrap.visible = prevReinLVisible;
+    this.playerRig.rightReinStrap.visible = prevReinRVisible;
+    this.scene.add(this.playerRig.root);
+    this.applyUpgradeStats(refillVitals);
+    this.playerRig.setDamageScars(this.playerScarSeverity, this.clock.elapsedTime);
+    if (this.fusionActive) {
+      this.playerRig.setFusionGlow(0.85, DRAGON_SPECS[this.dragonId].eyeColor);
+    }
+  }
+
+  public setDragonAppearance(patch: Partial<DragonAppearanceConfig>): boolean {
+    this.audio.init();
+    const current = this.progression.dragonAppearance[this.dragonId];
+    const next: DragonAppearanceConfig = {
+      scalePalette: patch.scalePalette ?? current.scalePalette,
+      hornStyle: patch.hornStyle ?? current.hornStyle,
+      wingStyle: patch.wingStyle ?? current.wingStyle,
+    };
+
+    const sPreset = DRAGON_SCALE_PRESETS.find((p) => p.id === next.scalePalette);
+    const hPreset = DRAGON_HORN_PRESETS.find((p) => p.id === next.hornStyle);
+    const wPreset = DRAGON_WING_PRESETS.find((p) => p.id === next.wingStyle);
+
+    if (!sPreset || !hPreset || !wPreset) return false;
+
+    if (
+      !isAppearanceUnlocked(sPreset.unlock, this.progression) ||
+      !isAppearanceUnlocked(hPreset.unlock, this.progression) ||
+      !isAppearanceUnlocked(wPreset.unlock, this.progression)
+    ) {
+      const blocked = !isAppearanceUnlocked(sPreset.unlock, this.progression)
+        ? sPreset.unlock.labelAr
+        : !isAppearanceUnlocked(hPreset.unlock, this.progression)
+          ? hPreset.unlock.labelAr
+          : wPreset.unlock.labelAr;
+      this.showToast(`مغلق — ${blocked}`);
+      return false;
+    }
+
+    this.progression.dragonAppearance = {
+      ...this.progression.dragonAppearance,
+      [this.dragonId]: next,
+    };
+    this.rebuildPlayerRigWithAppearance(false);
+    this.saveProgression();
+    this.audio.playBondChime(0.8);
+    this.showToast(`تم تحديث مظهر ${DRAGON_SPECS[this.dragonId].nameAr}!`);
+    this.emitHud();
+    return true;
+  }
+
+  public resetDragonAppearance(): void {
+    this.audio.init();
+    this.progression.dragonAppearance = {
+      ...this.progression.dragonAppearance,
+      [this.dragonId]: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID[this.dragonId] },
+    };
+    this.rebuildPlayerRigWithAppearance(false);
+    this.saveProgression();
+    this.audio.playBondChime(0.5);
+    this.showToast(`تمت استعادة المظهر الأصلي لـ ${DRAGON_SPECS[this.dragonId].nameAr}`);
+    this.emitHud();
+  }
+
   public upgradeKnight(key: KnightUpgradeKey): void {
     this.audio.init();
     if (
@@ -1444,9 +1637,19 @@ export class DragonEngine {
     ) {
       return;
     }
+    const prevUnlocked = this.countUnlockedAppearances();
     this.progression.dragonPoints -= 1;
     this.progression.dragonUpgrades[key] += 1;
-    this.applyUpgradeStats(false);
+    if (key === 'scales') {
+      this.rebuildPlayerRigWithAppearance(false);
+    } else {
+      this.applyUpgradeStats(false);
+    }
+    const nextUnlocked = this.countUnlockedAppearances();
+    if (nextUnlocked > prevUnlocked) {
+      const gained = nextUnlocked - prevUnlocked;
+      this.showToast(`تم فتح ${gained} مظهر جديد للتنين في شاشة التخصيص!`);
+    }
     this.saveProgression();
     this.audio.playBondChime(0.95);
     this.audio.playRoar(this.activeElement);
@@ -1496,13 +1699,14 @@ export class DragonEngine {
       ...DEFAULT_PROGRESSION,
       knightUpgrades: { ...DEFAULT_PROGRESSION.knightUpgrades },
       dragonUpgrades: { ...DEFAULT_PROGRESSION.dragonUpgrades },
+      dragonAppearance: createDefaultAppearanceMap(),
     };
     try {
       window.localStorage.removeItem(PROGRESS_STORAGE_KEY);
     } catch {
       // Ignore
     }
-    this.applyUpgradeStats(true);
+    this.rebuildPlayerRigWithAppearance(true);
     this.emitHud();
   }
 
@@ -1680,7 +1884,14 @@ export class DragonEngine {
   }
 
   private addSpiritualBond(amount: number, emitFeedback = false): void {
-    if (this.fusionActive || amount <= 0 || this.phase !== 'flying' || this.playerCrashing) return;
+    if (
+      this.fusionActive ||
+      amount <= 0 ||
+      (this.phase !== 'flying' && this.phase !== 'on_foot') ||
+      this.playerCrashing
+    ) {
+      return;
+    }
     const prev = this.spiritualBond;
     this.spiritualBond = Math.min(100, prev + amount);
 
@@ -1837,10 +2048,145 @@ export class DragonEngine {
     this.emitHud();
   }
 
+  public triggerBarrelRoll(forcedSide?: -1 | 1): void {
+    if (this.phase !== 'flying' || this.playerCrashing) return;
+    if (this.barrelRollTimer > 0 || this.barrelRollCooldown > 0.05) return;
+    this.audio.init();
+
+    if (!this.fusionActive && this.energy < 12) {
+      this.showToast('الطاقة غير كافية لتنفيذ التفاف الهروب!');
+      return;
+    }
+    if (!this.fusionActive) {
+      this.energy = Math.max(0, this.energy - 12);
+    }
+
+    const turnLeft =
+      this.keys['KeyA'] || this.keys['ArrowLeft'] || this.manualSteerX < -0.2;
+    const turnRight =
+      this.keys['KeyD'] || this.keys['ArrowRight'] || this.manualSteerX > 0.2;
+    const dir: -1 | 1 =
+      forcedSide ??
+      (turnLeft ? 1 : turnRight ? -1 : this.playerRoll >= 0 ? 1 : -1);
+
+    this.landingRequested = false;
+    this.knifeEdgeSide = 0;
+    this.barrelRollDir = dir;
+    this.barrelRollStartRoll = this.playerRoll;
+    this.barrelRollTimer = this.barrelRollDuration;
+    this.barrelRollCooldown = this.barrelRollCooldownMax;
+    this.barrelRollEvadedThisRoll = false;
+    this.barrelRollTrailTimer = 0;
+
+    // Lateral dodge impulse perpendicular to dragon nose + crisp forward slipstream kick
+    _forward.set(0, 0, -1).applyQuaternion(this.flightQuat).normalize();
+    _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
+    this.velocity.addScaledVector(_right, -dir * 32);
+    this.velocity.addScaledVector(_forward, 12);
+
+    this.maneuverKind = 'barrel_roll';
+    this.maneuverSide = dir > 0 ? -1 : 1;
+    this.maneuverIntensity = 1;
+    this.maneuverFlashTimer = this.barrelRollDuration;
+
+    this.audio.playBarrelRoll(this.maneuverSide as -1 | 1);
+    this.audio.speakKnight('boost');
+
+    for (let i = 0; i < 14; i++) {
+      const ang = (i / 14) * Math.PI * 2;
+      this.spawnElemParticle(
+        this.playerPos.x + _right.x * Math.cos(ang) * 4.5,
+        this.playerPos.y + Math.sin(ang) * 3.0,
+        this.playerPos.z + _right.z * Math.cos(ang) * 4.5,
+        this.velocity.x * 0.2 + _right.x * Math.cos(ang) * 14,
+        Math.sin(ang) * 10,
+        this.velocity.z * 0.2 + _right.z * Math.cos(ang) * 14,
+        0xe0f2fe,
+        0x38bdf8,
+        0.42,
+        1.15,
+        2.6,
+        0,
+        1.4,
+        0,
+      );
+    }
+
+    this.presentFlightTip({
+      id: 'maneuver_barrel_roll',
+      category: 'maneuver',
+      titleAr: 'مهارة التفاف الهروب (Barrel Roll)',
+      mechanicTagAr: 'B · مراوغة 360° + تفادي الهجمات',
+      bodyAr: 'يناور التنين بدوران كامل وسريع جانبياً لتفادي قذائف الأعداء وهجماتهم القريبة مع شحن الرابطة الروحية عند نجاح التفادي.',
+    });
+    this.emitHud();
+  }
+
+  public communeWithDragon(): void {
+    if ((this.phase !== 'flying' && this.phase !== 'on_foot') || this.playerCrashing) return;
+    if (this.communeTimer > 0 || this.communeCooldown > 0.05) return;
+    this.audio.init();
+
+    this.communeTimer = this.communeDuration;
+    this.communeCooldown = this.communeCooldownMax;
+    this.bondLevel = Math.min(100, this.bondLevel + 5);
+
+    const nearOnFoot =
+      this.phase === 'on_foot' &&
+      this.riderPos.distanceTo(this.landedDragonPos) < 22;
+    const bondGain = this.phase === 'on_foot' ? (nearOnFoot ? 15 : 10) : 12;
+
+    if (this.fusionActive) {
+      this.fusionTimeLeft = Math.min(this.fusionDuration, this.fusionTimeLeft + 1.0);
+      this.audio.playBondChime(0.95);
+      this.showToast('تواصل روحي عميق! +1.0ث للاندماج');
+    } else {
+      const wasBelowMax = this.spiritualBond < 100;
+      this.addSpiritualBond(bondGain, true);
+      if (wasBelowMax && this.spiritualBond < 100) {
+        this.showToast(`تحية وتواصل مع التنين! +${bondGain} رابطة روحية`);
+      }
+    }
+
+    this.audio.speakKnight('commune', true);
+    this.audio.playDragonAffection(this.activeElement);
+
+    const origin = this.phase === 'on_foot' ? this.riderPos : this.playerPos;
+    for (let i = 0; i < 14; i++) {
+      const ang = (i / 14) * Math.PI * 2;
+      this.spawnElemParticle(
+        origin.x + Math.cos(ang) * 2.2,
+        origin.y + 1.8 + Math.random() * 1.6,
+        origin.z + Math.sin(ang) * 2.2,
+        Math.cos(ang) * 6,
+        3.5 + Math.random() * 5.5,
+        Math.sin(ang) * 6,
+        0xfef08a,
+        0x38bdf8,
+        0.55 + Math.random() * 0.25,
+        1.05,
+        2.8,
+        -1.2,
+        1.1,
+        1,
+      );
+    }
+
+    this.presentFlightTip({
+      id: 'maneuver_commune',
+      category: 'maneuver',
+      titleAr: 'التحية والتواصل الروحي (Y)',
+      mechanicTagAr: 'Y · تعزيز العهد وشحن الرابطة',
+      bodyAr: 'يحيّي الفارس تنينه بلمسةٍ أو نداءٍ ودود، مما يرفع الرابطة الروحية فوراً نحو حالة الاندماج (Z).',
+    });
+    this.emitHud();
+  }
+
   public jumpOffDragon(): void {
     if (this.phase !== 'flying' || this.playerCrashing) return;
     this.audio.init();
     this.knifeEdgeSide = 0;
+    this.barrelRollTimer = 0;
     this.maneuverKind = 'none';
     this.maneuverSide = 0;
     this.maneuverIntensity = 0;
@@ -1892,6 +2238,7 @@ export class DragonEngine {
     if (this.phase !== 'flying' || this.playerCrashing) return;
     this.audio.init();
     this.knifeEdgeSide = 0;
+    this.barrelRollTimer = 0;
     this.halfLoopRemaining = 0;
     this.maneuverKind = 'none';
     this.maneuverSide = 0;
@@ -1943,6 +2290,7 @@ export class DragonEngine {
     this.velocity.y += 14;
     this.landingRequested = false;
     this.knifeEdgeSide = 0;
+    this.barrelRollTimer = 0;
     this.phase = 'flying';
 
     // Takeoff dust scatter beneath wings
@@ -1979,6 +2327,8 @@ export class DragonEngine {
     this.playerCrashing = false;
     this.playerCrashTimer = 0;
     this.knifeEdgeSide = 0;
+    this.barrelRollTimer = 0;
+    this.barrelRollCooldown = 0;
     this.maneuverKind = 'none';
     this.maneuverSide = 0;
     this.maneuverIntensity = 0;
@@ -2023,6 +2373,8 @@ export class DragonEngine {
     this.playerCrashing = false;
     this.playerCrashTimer = 0;
     this.knifeEdgeSide = 0;
+    this.barrelRollTimer = 0;
+    this.barrelRollCooldown = 0;
     this.maneuverKind = 'none';
     this.maneuverSide = 0;
     this.maneuverIntensity = 0;
@@ -2116,6 +2468,8 @@ export class DragonEngine {
     this.playerCrashing = false;
     this.playerCrashTimer = 0;
     this.knifeEdgeSide = 0;
+    this.barrelRollTimer = 0;
+    this.barrelRollCooldown = 0;
     this.cinematicActive = false;
     this.cinematicTimer = 0;
     this.cinematicBlend = 0;
@@ -3319,6 +3673,9 @@ export class DragonEngine {
     this.playerScarSeverity = THREE.MathUtils.damp(this.playerScarSeverity, targetScarSev, 5.5, dt);
     this.playerRig.setDamageScars(this.playerScarSeverity, elapsed);
 
+    this.communeCooldown = Math.max(0, this.communeCooldown - dt);
+    this.communeTimer = Math.max(0, this.communeTimer - dt);
+
     this.woundEmberTimer -= dt;
     if (
       this.playerScarSeverity > 0.3 &&
@@ -3402,31 +3759,88 @@ export class DragonEngine {
         Boolean(this.keys['KeyW']));
 
     let targetBlur = 0;
+    let targetDiveGlow = 0;
+    let targetBarrelSwirl = 0;
     if (this.phase === 'flying' && !this.playerCrashing) {
-      const speedFactor = THREE.MathUtils.clamp((this.playerSpeed - 68) / 56, 0, 1);
-      const diveFactor = this.diveTuckFactor * 0.78;
+      const specMaxCruise =
+        (DRAGON_SPECS[this.dragonId].baseSpeed +
+          this.progression.dragonUpgrades.wings * 6.5) *
+        1.42;
+      const speedFactor = THREE.MathUtils.clamp(
+        (this.playerSpeed - 58) / Math.max(40, specMaxCruise - 36),
+        0,
+        1,
+      );
+      const nearMaxSurge = THREE.MathUtils.smoothstep(
+        this.playerSpeed,
+        specMaxCruise * 0.74,
+        specMaxCruise * 1.15,
+      );
+      const diveFactor = this.diveTuckFactor * 0.88;
       const boostPulse = boosting ? 0.65 + speedFactor * 0.35 : 0;
-      const fusionBlur = this.fusionActive ? 0.42 : 0;
-      const windBlur = this.windCurrentIntensity * 0.52;
+      const fusionBlur = this.fusionActive ? 0.44 : 0;
+      const windBlur = this.windCurrentIntensity * 0.56;
+      const barrelPulse =
+        this.barrelRollTimer > 0
+          ? Math.max(
+              0.76,
+              Math.sin(
+                (1 - this.barrelRollTimer / this.barrelRollDuration) * Math.PI,
+              ),
+            )
+          : 0;
+      targetBarrelSwirl = this.barrelRollDir * barrelPulse;
+      targetDiveGlow = THREE.MathUtils.clamp(
+        Math.max(
+          nearMaxSurge,
+          this.diveTuckFactor * 0.94,
+          barrelPulse,
+          boosting ? 0.42 + nearMaxSurge * 0.58 : 0,
+        ),
+        0,
+        1,
+      );
       targetBlur = THREE.MathUtils.clamp(
-        Math.max(speedFactor * 0.88, boostPulse, diveFactor, fusionBlur, windBlur),
+        Math.max(
+          speedFactor * 0.9,
+          nearMaxSurge,
+          boostPulse,
+          diveFactor,
+          fusionBlur,
+          windBlur,
+          barrelPulse * 0.98,
+        ),
         0,
         1,
       );
     } else if (this.phase === 'skydiving' && this.skydiveState === 'falling') {
-      targetBlur = THREE.MathUtils.clamp((this.riderVel.length() - 26) / 48, 0, 0.72);
+      const skyRatio = THREE.MathUtils.clamp((this.riderVel.length() - 24) / 46, 0, 1);
+      targetBlur = skyRatio * 0.82;
+      targetDiveGlow = skyRatio * 0.65;
     }
 
     this.motionBlurIntensity = THREE.MathUtils.damp(
       this.motionBlurIntensity,
       targetBlur,
-      targetBlur > this.motionBlurIntensity ? 6.5 : 4.2,
+      targetBlur > this.motionBlurIntensity ? 7.5 : 4.2,
       dt,
     );
     this.boostVisualFactor = THREE.MathUtils.damp(
       this.boostVisualFactor,
       boosting ? 1 : 0,
       7.5,
+      dt,
+    );
+    this.diveGlowFactor = THREE.MathUtils.damp(
+      this.diveGlowFactor,
+      targetDiveGlow,
+      targetDiveGlow > this.diveGlowFactor ? 8.2 : 4.5,
+      dt,
+    );
+    this.barrelVisualFactor = THREE.MathUtils.damp(
+      this.barrelVisualFactor,
+      targetBarrelSwirl,
+      Math.abs(targetBarrelSwirl) > Math.abs(this.barrelVisualFactor) ? 14 : 7.5,
       dt,
     );
 
@@ -3439,18 +3853,24 @@ export class DragonEngine {
         -1,
         1,
       );
+      u.diveGlow.value = this.diveGlowFactor;
+      u.barrelSwirl.value = this.barrelVisualFactor;
       u.vignetteStrength.value = 0.24 + this.motionBlurIntensity * 0.14;
     }
 
     if (this.motionBlurIntensity > 0.08 && (this.phase === 'flying' || this.phase === 'skydiving')) {
       this.speedStreakLines.visible = true;
       this.speedStreakMat.opacity = THREE.MathUtils.clamp(
-        (this.motionBlurIntensity - 0.08) * (0.34 + this.boostVisualFactor * 0.24),
+        (this.motionBlurIntensity - 0.06) *
+          (0.42 + this.boostVisualFactor * 0.24 + this.diveGlowFactor * 0.22),
         0,
-        0.55,
+        0.78,
       );
-      if (this.boostVisualFactor > 0.35) {
-        this.speedStreakMat.color.setHex(0xffe7c4);
+      const barrelAbs = Math.abs(this.barrelVisualFactor);
+      if (barrelAbs > 0.18) {
+        this.speedStreakMat.color.setHex(0x8be9ff);
+      } else if (this.boostVisualFactor > 0.35 || this.diveTuckFactor > 0.45) {
+        this.speedStreakMat.color.setHex(0xffe1b0);
       } else if (this.windCurrentIntensity > 0.28) {
         this.speedStreakMat.color.setHex(0xbbeeff);
       } else {
@@ -3466,17 +3886,29 @@ export class DragonEngine {
 
       const posAttr = this.speedStreakLines.geometry.getAttribute('position') as THREE.BufferAttribute;
       const arr = posAttr.array as Float32Array;
-      const travelRate = 1.65 + this.motionBlurIntensity * 2.1 + this.boostVisualFactor * 1.1;
-      const streakLen = 3.2 + this.motionBlurIntensity * 6.8 + this.boostVisualFactor * 3.4;
+      const travelRate =
+        1.8 +
+        this.motionBlurIntensity * 2.4 +
+        this.boostVisualFactor * 1.1 +
+        this.diveGlowFactor * 1.4;
+      const streakLen =
+        3.6 +
+        this.motionBlurIntensity * 8.0 +
+        this.boostVisualFactor * 3.6 +
+        this.diveGlowFactor * 4.2;
       const camPos = this.camera.position;
 
       for (let i = 0; i < this.speedStreakCount; i++) {
-        const ang = this.speedStreakSeeds[i * 4];
-        const rad = this.speedStreakSeeds[i * 4 + 1] * (1.0 - this.boostVisualFactor * 0.14);
+        const baseAng = this.speedStreakSeeds[i * 4];
+        const rad =
+          this.speedStreakSeeds[i * 4 + 1] *
+          (1.0 - this.boostVisualFactor * 0.12 - this.diveGlowFactor * 0.1);
         const phase0 = this.speedStreakSeeds[i * 4 + 2];
         const mul = this.speedStreakSeeds[i * 4 + 3];
 
         const zProg = (phase0 + elapsed * travelRate * mul) % 1;
+        // Corkscrew twist on speed lines during Barrel Roll
+        const ang = baseAng + (1 - zProg) * this.barrelVisualFactor * 1.35;
         // Stream from 58m ahead down to 1m behind camera
         const depth = 58 - zProg * 60;
         const spreadScale = 0.55 + (1 - zProg) * 0.65;
@@ -3693,16 +4125,40 @@ export class DragonEngine {
     }
     this.flightQuat.normalize();
 
-    const targetRoll =
-      this.knifeEdgeSide !== 0
-        ? this.knifeEdgeSide * (Math.PI * 0.5)
-        : THREE.MathUtils.clamp(turnInput * 0.62 + gustX * 0.26, -0.84, 0.84);
-    this.playerRoll = THREE.MathUtils.damp(
-      this.playerRoll,
-      targetRoll,
-      this.knifeEdgeSide !== 0 ? 7.8 : 5.8,
-      dt,
-    );
+    this.barrelRollCooldown = Math.max(0, this.barrelRollCooldown - dt);
+    if (this.barrelRollTimer > 0) {
+      this.barrelRollTimer = Math.max(0, this.barrelRollTimer - dt);
+      const u = THREE.MathUtils.clamp(
+        1 - this.barrelRollTimer / this.barrelRollDuration,
+        0,
+        1,
+      );
+      const eased =
+        0.35 * Math.sin(u * Math.PI * 0.5) + 0.65 * (u * u * (3 - 2 * u));
+      this.playerRoll =
+        THREE.MathUtils.lerp(this.barrelRollStartRoll, 0, eased) +
+        this.barrelRollDir * Math.PI * 2 * eased;
+
+      _right.set(1, 0, 0).applyQuaternion(this.flightQuat).normalize();
+      this.velocity.addScaledVector(
+        _right,
+        -this.barrelRollDir * Math.sin(u * Math.PI) * 34 * dt,
+      );
+      if (this.barrelRollTimer <= 0) {
+        this.playerRoll = 0;
+      }
+    } else {
+      const targetRoll =
+        this.knifeEdgeSide !== 0
+          ? this.knifeEdgeSide * (Math.PI * 0.5)
+          : THREE.MathUtils.clamp(turnInput * 0.62 + gustX * 0.26, -0.84, 0.84);
+      this.playerRoll = THREE.MathUtils.damp(
+        this.playerRoll,
+        targetRoll,
+        this.knifeEdgeSide !== 0 ? 7.8 : 5.8,
+        dt,
+      );
+    }
 
     // 1:1 Hand Synchronization: smooth rider hand pull matching steering & pitch
     const rawHandX = THREE.MathUtils.clamp(-turnInput, -1, 1);
@@ -3748,7 +4204,12 @@ export class DragonEngine {
     const absTurn = Math.abs(turnInput);
     const absRoll = Math.abs(this.playerRoll);
 
-    if (this.knifeEdgeSide !== 0 || absRoll > 1.05) {
+    if (this.barrelRollTimer > 0) {
+      this.maneuverKind = 'barrel_roll';
+      this.maneuverSide = this.barrelRollDir > 0 ? -1 : 1;
+      this.maneuverIntensity = 1;
+      this.maneuverFlashTimer = Math.max(this.maneuverFlashTimer, 0.25);
+    } else if (this.knifeEdgeSide !== 0 || absRoll > 1.05) {
       this.maneuverKind = 'knife_edge';
       const rollSide = this.knifeEdgeSide !== 0 ? this.knifeEdgeSide : this.playerRoll >= 0 ? 1 : -1;
       this.maneuverSide = rollSide > 0 ? -1 : 1;
@@ -4115,6 +4576,15 @@ export class DragonEngine {
       if (dist < nearestTalonEnemyDist) {
         nearestTalonEnemyDist = dist;
       }
+      if (dist < 13.5 && this.barrelRollTimer > 0) {
+        if (!this.barrelRollEvadedThisRoll) {
+          this.barrelRollEvadedThisRoll = true;
+          this.addSpiritualBond(14, true);
+          this.audio.playEvadeSuccess();
+          this.showToast('تفادي هجوم جوي! +14 رابطة روحية');
+        }
+        continue;
+      }
       if (dist < 12.2 && this.talonClashCooldown <= 0) {
         this.talonClashCooldown = 1.05;
         this.talonClashTimer = 0.68;
@@ -4416,9 +4886,15 @@ export class DragonEngine {
     const wingTuck = this.knifeEdgeSide !== 0 ? 0.34 : 0;
 
     // Sweeping wings tightly backward & down against flanks during steep dives, plus aeroelastic sweep & flutter in Wind Currents
-    const diveSweepInnerY = 0.98 * this.diveTuckFactor;
-    const diveSweepOuterY = 0.34 * this.diveTuckFactor;
-    const diveHugZ = 0.24 * this.diveTuckFactor;
+    const rollFold =
+      this.barrelRollTimer > 0
+        ? Math.sin(
+            (1 - this.barrelRollTimer / this.barrelRollDuration) * Math.PI,
+          ) * 0.42
+        : 0;
+    const diveSweepInnerY = 0.98 * this.diveTuckFactor + rollFold;
+    const diveSweepOuterY = 0.34 * this.diveTuckFactor + rollFold * 0.45;
+    const diveHugZ = 0.24 * this.diveTuckFactor + rollFold * 0.35;
     const diveOuterFoldZ = 0.55 * this.diveTuckFactor;
 
     const windSweepInnerY = 0.18 * wc * (1 - this.diveTuckFactor);
@@ -4487,17 +4963,26 @@ export class DragonEngine {
     this.playerRig.leftHindFoot.rotation.x = footX;
     this.playerRig.rightHindFoot.rotation.x = footX;
 
-    // Synchronize Rider Hands, Leather Reins, and Dragon Neck with Hand Motion!
+    // Synchronize Rider Hands, Leather Reins, Dragon Neck & Symbolic Greeting Gesture!
     const bob = Math.sin(this.wingPhase) * 0.04;
+    const communeProgress =
+      this.communeTimer > 0 ? 1 - this.communeTimer / this.communeDuration : 0;
+    const communeWave =
+      this.communeTimer > 0 ? Math.sin(communeProgress * Math.PI) : 0;
+    const communePat =
+      this.communeTimer > 0
+        ? Math.sin(communeProgress * Math.PI * 3) * 0.09 * communeWave
+        : 0;
+
     this.playerRig.leftHandGroup.position.set(
-      -0.62 + this.smoothedHandX * 0.18,
-      2.36 + this.smoothedHandY * 0.14 + bob,
-      -0.92 + (this.smoothedHandX < 0 ? 0.16 : -0.04),
+      -0.62 + this.smoothedHandX * 0.18 + communeWave * 0.24,
+      2.36 + this.smoothedHandY * 0.14 + bob - communeWave * 0.18 + communePat,
+      -0.92 + (this.smoothedHandX < 0 ? 0.16 : -0.04) - communeWave * 0.56,
     );
     this.playerRig.leftHandGroup.rotation.set(
-      this.smoothedHandY * 0.35,
-      -this.smoothedHandX * 0.3,
-      -this.smoothedHandX * 0.45,
+      this.smoothedHandY * 0.35 - communeWave * 0.42,
+      -this.smoothedHandX * 0.3 + communeWave * 0.35,
+      -this.smoothedHandX * 0.45 - communeWave * 0.28,
     );
 
     // Reins dynamically flex with hand pull & neck turn
@@ -4514,38 +4999,47 @@ export class DragonEngine {
     );
     this.playerRig.rightReinStrap.rotation.y = -this.smoothedHandX * 0.14;
 
-    // Right Sword Hand: lifelike grip sway, turn lean, AND full sweeping 3D sword slash arc!
+    // Right Sword Hand: lifelike grip sway, turn lean, sword slash arc & symbolic salute!
     const fireLift = this.isFiring ? 0.14 : 0;
     const slashProgress = this.swordSwingTimer > 0 ? 1 - this.swordSwingTimer / 0.38 : 0;
     const slashArc = Math.sin(slashProgress * Math.PI);
+    const saluteLift = this.swordSwingTimer <= 0 ? communeWave * 0.34 : 0;
     this.playerRig.swordArmGroup.position.set(
       0.88 + this.smoothedHandX * 0.16 - slashArc * 0.68,
-      2.3 + this.smoothedHandY * 0.12 + bob + fireLift + slashArc * 0.28,
-      -0.92 - fireLift * 0.45 - slashArc * 0.56,
+      2.3 + this.smoothedHandY * 0.12 + bob + fireLift + slashArc * 0.28 + saluteLift,
+      -0.92 - fireLift * 0.45 - slashArc * 0.56 - saluteLift * 0.45,
     );
     this.playerRig.swordArmGroup.rotation.set(
-      0.22 + this.smoothedHandY * 0.25 - fireLift - slashArc * 1.38,
+      0.22 + this.smoothedHandY * 0.25 - fireLift - slashArc * 1.38 - saluteLift * 1.85,
       0.1 - this.smoothedHandX * 0.25 + slashArc * 0.72,
-      -0.35 - this.smoothedHandX * 0.35 + slashArc * 1.15,
+      -0.35 - this.smoothedHandX * 0.35 + slashArc * 1.15 - saluteLift * 0.4,
     );
 
     if (this.isFiring && this.energy > 1) {
       this.jawOpenAmount = THREE.MathUtils.damp(this.jawOpenAmount, 0.54, 12, dt);
     } else if (this.roarTimer > 0) {
       this.jawOpenAmount = THREE.MathUtils.damp(this.jawOpenAmount, 0.62, 12, dt);
+    } else if (communeWave > 0.05) {
+      this.jawOpenAmount = THREE.MathUtils.damp(this.jawOpenAmount, 0.18 * communeWave, 10, dt);
     } else {
       this.jawOpenAmount = THREE.MathUtils.damp(this.jawOpenAmount, 0.05, 8, dt);
     }
     this.playerRig.jawGroup.rotation.x = this.jawOpenAmount;
     this.playerRig.neckGroup.rotation.y = THREE.MathUtils.damp(
       this.playerRig.neckGroup.rotation.y,
-      -this.smoothedHandX * 0.24,
+      -this.smoothedHandX * 0.24 + communeWave * 0.14,
       8,
       dt,
     );
     this.playerRig.neckGroup.rotation.x = THREE.MathUtils.damp(
       this.playerRig.neckGroup.rotation.x,
-      this.smoothedHandY * 0.16,
+      this.smoothedHandY * 0.16 - communeWave * 0.14,
+      8,
+      dt,
+    );
+    this.playerRig.headGroup.rotation.z = THREE.MathUtils.damp(
+      this.playerRig.headGroup.rotation.z,
+      communeWave * 0.22,
       8,
       dt,
     );
@@ -4677,8 +5171,12 @@ export class DragonEngine {
       _normCamPos.x += Math.sin(elapsed * 43) * shakeAmp;
       _normCamPos.y += Math.cos(elapsed * 37) * shakeAmp;
 
-      // Subtle tilt on full chase camera during 90° knife-edge flight so horizon remains legible
-      _qRoll.setFromAxisAngle(_unitZ, this.playerRoll * 0.22);
+      // Subtle tilt on full chase camera during 90° knife-edge & smooth horizon comfort during Barrel Roll
+      const camRollAngle =
+        this.barrelRollTimer > 0
+          ? Math.sin(this.playerRoll) * 0.24
+          : this.playerRoll * 0.22;
+      _qRoll.setFromAxisAngle(_unitZ, camRollAngle);
       _quatA.copy(this.flightQuat).multiply(_qRoll);
       _normCamUp.set(0, 1, 0).applyQuaternion(_quatA).normalize();
       _normLookAt
@@ -4691,7 +5189,13 @@ export class DragonEngine {
       _normCamPos.x += Math.sin(elapsed * 43) * shakeAmp;
       _normCamPos.y += Math.sin(this.wingPhase) * 0.07 + Math.cos(elapsed * 37) * shakeAmp;
       _normLookAt.copy(_normCamPos).addScaledVector(_forward, 45);
-      _normCamUp.set(0, 1, 0).applyQuaternion(_finalQuat);
+      if (this.barrelRollTimer > 0) {
+        _qRoll.setFromAxisAngle(_unitZ, Math.sin(this.playerRoll) * 0.42);
+        _quatA.copy(this.flightQuat).multiply(_qRoll);
+        _normCamUp.set(0, 1, 0).applyQuaternion(_quatA);
+      } else {
+        _normCamUp.set(0, 1, 0).applyQuaternion(_finalQuat);
+      }
     }
 
     const cineSmooth = THREE.MathUtils.smoothstep(this.cinematicBlend, 0, 1);
@@ -4760,16 +5264,61 @@ export class DragonEngine {
       this.camera.lookAt(_normLookAt);
     }
 
+    const barrelRollFov =
+      this.barrelRollTimer > 0
+        ? Math.sin(
+            (1 - this.barrelRollTimer / this.barrelRollDuration) * Math.PI,
+          ) * 6.5
+        : 0;
     const targetFov = THREE.MathUtils.clamp(
-      64 + (this.playerSpeed - 45) * 0.36 + this.diveTuckFactor * 6 - cineSmooth * 7.5,
+      64 + (this.playerSpeed - 45) * 0.36 + this.diveTuckFactor * 6 + barrelRollFov - cineSmooth * 7.5,
       56,
-      92,
+      94,
     );
     this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 5, dt);
     this.camera.updateProjectionMatrix();
 
     this.playerRig.leftWingTip.getWorldPosition(_v1);
     this.playerRig.rightWingTip.getWorldPosition(_v2);
+
+    if (this.barrelRollTimer > 0) {
+      this.barrelRollTrailTimer -= dt;
+      if (this.barrelRollTrailTimer <= 0) {
+        this.barrelRollTrailTimer = 0.026;
+        this.spawnElemParticle(
+          _v1.x,
+          _v1.y,
+          _v1.z,
+          this.velocity.x * 0.12,
+          this.velocity.y * 0.12,
+          this.velocity.z * 0.12,
+          0xe0f2fe,
+          0x38bdf8,
+          0.38,
+          0.95,
+          1.8,
+          0,
+          0.8,
+          0,
+        );
+        this.spawnElemParticle(
+          _v2.x,
+          _v2.y,
+          _v2.z,
+          this.velocity.x * 0.12,
+          this.velocity.y * 0.12,
+          this.velocity.z * 0.12,
+          0xe0f2fe,
+          0x38bdf8,
+          0.38,
+          0.95,
+          1.8,
+          0,
+          0.8,
+          0,
+        );
+      }
+    }
 
     const leftOverWater = getTerrainHeight(_v1.x, _v1.z) < -0.5;
     const rightOverWater = getTerrainHeight(_v2.x, _v2.z) < -0.5;
@@ -5586,12 +6135,18 @@ export class DragonEngine {
     this.landedHeadYaw = THREE.MathUtils.damp(this.landedHeadYaw, targetHeadYaw, 3.6, dt);
     this.landedHeadPitch = THREE.MathUtils.damp(this.landedHeadPitch, targetHeadPitch, 4.2, dt);
 
+    const onFootCommuneWave =
+      this.communeTimer > 0
+        ? Math.sin((1 - this.communeTimer / this.communeDuration) * Math.PI)
+        : 0;
     this.playerRig.neckGroup.rotation.y = this.landedHeadYaw;
-    this.playerRig.neckGroup.rotation.x = this.landedHeadPitch;
+    this.playerRig.neckGroup.rotation.x = this.landedHeadPitch - onFootCommuneWave * 0.12;
     this.playerRig.headGroup.rotation.y = this.landedHeadYaw * 0.25;
     this.playerRig.headGroup.rotation.z =
-      Math.sin(elapsed * 0.7) * (this.landedIsWalking ? 0.04 : 0.11);
-    this.playerRig.jawGroup.rotation.x = 0.04 + (breathe + 1) * 0.025;
+      Math.sin(elapsed * 0.7) * (this.landedIsWalking ? 0.04 : 0.11) +
+      onFootCommuneWave * 0.24;
+    this.playerRig.jawGroup.rotation.x =
+      0.04 + (breathe + 1) * 0.025 + onFootCommuneWave * 0.18;
 
     // Fluid sinuous tail S-wave compensating walking hips and turns
     const tailFreq = 1.65 + this.landedWalkBlend * 2.1;
@@ -5684,12 +6239,21 @@ export class DragonEngine {
     const slashT = this.swordSwingTimer > 0 ? 1 - this.swordSwingTimer / 0.38 : 0;
     const slashWave = Math.sin(slashT * Math.PI);
 
+    const greetArmPitch = -onFootCommuneWave * 1.55;
+    const greetArmWave =
+      onFootCommuneWave > 0.05
+        ? -0.35 - Math.sin(elapsed * 14) * 0.26 * onFootCommuneWave
+        : 0;
     if (horizSpeed > 0.5) {
       this.riderWalkCycle += dt * (sprinting ? 14 : 9.5);
       const sw = Math.sin(this.riderWalkCycle) * (sprinting ? 0.78 : 0.52);
       this.activeRiderRig.leftLeg.rotation.set(sw, 0, 0);
       this.activeRiderRig.rightLeg.rotation.set(-sw, 0, 0);
-      this.activeRiderRig.leftArm.rotation.set(-sw * 0.85, 0, -0.08);
+      this.activeRiderRig.leftArm.rotation.set(
+        onFootCommuneWave > 0.05 ? greetArmPitch : -sw * 0.85,
+        0,
+        onFootCommuneWave > 0.05 ? greetArmWave : -0.08,
+      );
       this.activeRiderRig.rightArm.rotation.set(
         sw * 0.85 + slashWave * 1.65,
         slashWave * 0.55,
@@ -5700,7 +6264,11 @@ export class DragonEngine {
     } else {
       this.activeRiderRig.leftLeg.rotation.set(0, 0, 0);
       this.activeRiderRig.rightLeg.rotation.set(0, 0, 0);
-      this.activeRiderRig.leftArm.rotation.set(0, 0, -0.06);
+      this.activeRiderRig.leftArm.rotation.set(
+        greetArmPitch,
+        0,
+        onFootCommuneWave > 0.05 ? greetArmWave : -0.06,
+      );
       this.activeRiderRig.rightArm.rotation.set(
         0.25 + slashWave * 1.75,
         slashWave * 0.55,
@@ -6750,7 +7318,38 @@ export class DragonEngine {
           }
         }
         if (!hit && this.phase === 'flying' && !this.playerCrashing) {
-          if (p.mesh.position.distanceTo(this.playerPos) < p.radius + 4.2) {
+          const distToPlayer = p.mesh.position.distanceTo(this.playerPos);
+          if (this.barrelRollTimer > 0 && distToPlayer < p.radius + 7.2) {
+            // Barrel Roll slipstream vortex evades & deflects incoming enemy projectile!
+            _normal.copy(p.mesh.position).sub(this.playerPos);
+            if (_normal.lengthSq() > 0.001) _normal.normalize();
+            else _normal.copy(_unitY);
+            for (let k = 0; k < 8; k++) {
+              this.spawnElemParticle(
+                p.mesh.position.x,
+                p.mesh.position.y,
+                p.mesh.position.z,
+                _normal.x * 16 + (Math.random() - 0.5) * 14,
+                _normal.y * 16 + (Math.random() - 0.5) * 14,
+                _normal.z * 16 + (Math.random() - 0.5) * 14,
+                0xe0f2fe,
+                0x22d3ee,
+                0.35,
+                0.9,
+                1.4,
+                0,
+                1.2,
+                1,
+              );
+            }
+            this.audio.playEvadeSuccess();
+            if (!this.barrelRollEvadedThisRoll) {
+              this.barrelRollEvadedThisRoll = true;
+              this.addSpiritualBond(14, true);
+              this.showToast('تفادي بارع! +14 رابطة روحية');
+            }
+            hit = true;
+          } else if (distToPlayer < p.radius + 4.2) {
             const armorMul = Math.max(0.45, 1 - this.progression.knightUpgrades.armor * 0.1);
             this.hp = Math.max(0, this.hp - p.damage * armorMul);
             this.woundsCount = Math.min(5, this.woundsCount + 1);
@@ -8258,6 +8857,9 @@ export class DragonEngine {
       lightningActive: Math.max(this.lightningPower, this.volcanicLightningPower) > 0.14,
       cameraView: this.cameraView,
       isLooping: this.halfLoopRemaining > 0.05,
+      isBarrelRolling: this.barrelRollTimer > 0,
+      barrelRollCooldown: Number(this.barrelRollCooldown.toFixed(1)),
+      barrelRollCooldownMax: this.barrelRollCooldownMax,
       knifeEdgeSide: this.knifeEdgeSide,
       maneuverKind: this.phase === 'flying' && !this.playerCrashing ? this.maneuverKind : 'none',
       maneuverSide: this.phase === 'flying' && !this.playerCrashing ? this.maneuverSide : 0,
@@ -8283,6 +8885,11 @@ export class DragonEngine {
         ...this.progression,
         knightUpgrades: { ...this.progression.knightUpgrades },
         dragonUpgrades: { ...this.progression.dragonUpgrades },
+        dragonAppearance: {
+          ignis: { ...this.progression.dragonAppearance.ignis },
+          glacius: { ...this.progression.dragonAppearance.glacius },
+          terra: { ...this.progression.dragonAppearance.terra },
+        },
       },
       dangerAlertActive: this.dangerAlertTimer > 0,
       activeLoreTaleId: this.activeLoreTaleId,
@@ -8290,6 +8897,9 @@ export class DragonEngine {
       isLorePlaying: this.isLorePlaying,
       knightSpeechText: this.knightSpeechText,
       spiritualBond: Math.round(this.spiritualBond),
+      isCommuning: this.communeTimer > 0,
+      communeCooldown: Number(this.communeCooldown.toFixed(1)),
+      communeCooldownMax: this.communeCooldownMax,
       fusionActive: this.fusionActive,
       fusionTimeLeft: Number(this.fusionTimeLeft.toFixed(1)),
       fusionDuration: this.fusionDuration,

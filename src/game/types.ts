@@ -118,6 +118,332 @@ export const ANCIENT_LORE_TALES: LoreTale[] = [
   },
 ];
 
+export type DragonScalePaletteId =
+  | 'default'
+  | 'crimson_ember'
+  | 'arctic_sapphire'
+  | 'obsidian_shadow'
+  | 'royal_jade'
+  | 'amethyst_storm'
+  | 'imperial_gold'
+  | 'celestial_prism';
+
+export type DragonHornStyleId =
+  | 'classic'
+  | 'curved_ram'
+  | 'split_crown'
+  | 'forward_spear'
+  | 'ancient_halo';
+
+export type DragonWingStyleId =
+  | 'natural'
+  | 'ember_vein'
+  | 'aurora_frost'
+  | 'abyssal_violet'
+  | 'solar_gold';
+
+export interface DragonAppearanceConfig {
+  scalePalette: DragonScalePaletteId;
+  hornStyle: DragonHornStyleId;
+  wingStyle: DragonWingStyleId;
+}
+
+export const DEFAULT_DRAGON_APPEARANCE_BY_ID: Record<DragonId, DragonAppearanceConfig> = {
+  ignis: { scalePalette: 'default', hornStyle: 'classic', wingStyle: 'natural' },
+  glacius: { scalePalette: 'default', hornStyle: 'classic', wingStyle: 'natural' },
+  terra: { scalePalette: 'default', hornStyle: 'classic', wingStyle: 'natural' },
+};
+
+export type AppearanceUnlockRequirement =
+  | { kind: 'always'; labelAr: string }
+  | { kind: 'dragon_upgrade'; key: DragonUpgradeKey; level: number; labelAr: string }
+  | { kind: 'knight_upgrade'; key: KnightUpgradeKey; level: number; labelAr: string }
+  | { kind: 'total_dragon'; level: number; labelAr: string };
+
+export interface DragonScalePreset {
+  id: DragonScalePaletteId;
+  nameAr: string;
+  subtitleAr: string;
+  primaryColor?: number;
+  secondaryColor?: number;
+  bellyColor?: number;
+  swatchPrimary: string;
+  swatchAccent: string;
+  iridescenceBoost?: number;
+  unlock: AppearanceUnlockRequirement;
+}
+
+export interface DragonHornPreset {
+  id: DragonHornStyleId;
+  nameAr: string;
+  subtitleAr: string;
+  unlock: AppearanceUnlockRequirement;
+}
+
+export interface DragonWingPreset {
+  id: DragonWingStyleId;
+  nameAr: string;
+  subtitleAr: string;
+  membraneColor?: number;
+  eyeColor?: number;
+  emissiveTint?: number;
+  emissiveIntensity?: number;
+  swatchHex: string;
+  unlock: AppearanceUnlockRequirement;
+}
+
+export const DRAGON_SCALE_PRESETS: DragonScalePreset[] = [
+  {
+    id: 'default',
+    nameAr: 'الحراشف الأصلية',
+    subtitleAr: 'المظهر الفطري الكلاسيكي للتنين',
+    swatchPrimary: '#64748b',
+    swatchAccent: '#cbd5e1',
+    unlock: { kind: 'always', labelAr: 'متاح منذ البداية' },
+  },
+  {
+    id: 'crimson_ember',
+    nameAr: 'ياقوت الجمر البركاني',
+    subtitleAr: 'حراشف قرمزية عميقة بدرع برونزي متقد',
+    primaryColor: 0x991b1b,
+    secondaryColor: 0x3b0a0a,
+    bellyColor: 0xea7a3a,
+    swatchPrimary: '#b91c1c',
+    swatchAccent: '#fb923c',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 1,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ١',
+    },
+  },
+  {
+    id: 'arctic_sapphire',
+    nameAr: 'ياقوت الجليد القطبي',
+    subtitleAr: 'صفائح زرقاء سماوية بلمعان فضي ناصع',
+    primaryColor: 0x0f4c81,
+    secondaryColor: 0xdbeafe,
+    bellyColor: 0x93c5fd,
+    swatchPrimary: '#0369a1',
+    swatchAccent: '#dbeafe',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 1,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ١',
+    },
+  },
+  {
+    id: 'obsidian_shadow',
+    nameAr: 'سبج العاصفة الداجي',
+    subtitleAr: 'درع بركاني فاحم بحواف رمادية فولاذية',
+    primaryColor: 0x1c1e26,
+    secondaryColor: 0x64748b,
+    bellyColor: 0x475569,
+    swatchPrimary: '#1e293b',
+    swatchAccent: '#94a3b8',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 2,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ٢',
+    },
+  },
+  {
+    id: 'royal_jade',
+    nameAr: 'يشم الأعالي الملكي',
+    subtitleAr: 'زمرد غابات السماء مع ترصيع ذهبي عتيق',
+    primaryColor: 0x065f46,
+    secondaryColor: 0xd4af37,
+    bellyColor: 0x6ee7b7,
+    swatchPrimary: '#047857',
+    swatchAccent: '#fcd34d',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 3,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ٣',
+    },
+  },
+  {
+    id: 'amethyst_storm',
+    nameAr: 'جمشت الرعد الأسطوري',
+    subtitleAr: 'حراشف أرجوانية ملكية ببريق برق فضي',
+    primaryColor: 0x4c1d95,
+    secondaryColor: 0xddd6fe,
+    bellyColor: 0xa78bfa,
+    swatchPrimary: '#6d28d9',
+    swatchAccent: '#e9d5ff',
+    iridescenceBoost: 0.25,
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 3,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ٣',
+    },
+  },
+  {
+    id: 'imperial_gold',
+    nameAr: 'درع الشمس الإمبراطوري',
+    subtitleAr: 'سبائك ذهبية مصقولة لملوك فرسان السماء',
+    primaryColor: 0xb45309,
+    secondaryColor: 0xfde68a,
+    bellyColor: 0xfcd34d,
+    swatchPrimary: '#d97706',
+    swatchAccent: '#fef08a',
+    iridescenceBoost: 0.2,
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 4,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ٤',
+    },
+  },
+  {
+    id: 'celestial_prism',
+    nameAr: 'طيف الفجر السماوي',
+    subtitleAr: 'درع بلوري قزحي فائق النقاء والصلابة',
+    primaryColor: 0x0f766e,
+    secondaryColor: 0xfef3c7,
+    bellyColor: 0x99f6e4,
+    swatchPrimary: '#0d9488',
+    swatchAccent: '#fde68a',
+    iridescenceBoost: 0.55,
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 5,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ٥',
+    },
+  },
+];
+
+export const DRAGON_HORN_PRESETS: DragonHornPreset[] = [
+  {
+    id: 'classic',
+    nameAr: 'التاج الملكي المقوس',
+    subtitleAr: 'قرون طويلة منسابة للخلف بتصميم متوازن',
+    unlock: { kind: 'always', labelAr: 'متاح منذ البداية' },
+  },
+  {
+    id: 'curved_ram',
+    nameAr: 'قرون الكبش الملتفة',
+    subtitleAr: 'انحناء دائري مهيب يلتف حول جانبي الرأس',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'scales',
+      level: 1,
+      labelAr: 'يتطلب: حراشف فولاذية · مستوى ١',
+    },
+  },
+  {
+    id: 'split_crown',
+    nameAr: 'التاج المزدوج المسنن',
+    subtitleAr: 'شعبة قرون مزدوجة حادة وصفائح حاجب معززة',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'breath',
+      level: 2,
+      labelAr: 'يتطلب: قوة النفث · مستوى ٢',
+    },
+  },
+  {
+    id: 'forward_spear',
+    nameAr: 'رماح الانقضاض الأمامية',
+    subtitleAr: 'قرون هجومية مندفعة للأمام مع نصل أنفي طويل',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'wings',
+      level: 2,
+      labelAr: 'يتطلب: سرعة الأجنحة · مستوى ٢',
+    },
+  },
+  {
+    id: 'ancient_halo',
+    nameAr: 'هالة التنين الأقدم',
+    subtitleAr: 'تاج إمبراطوري ثلاثي الفروع بحلقات مدرعة',
+    unlock: {
+      kind: 'total_dragon',
+      level: 6,
+      labelAr: 'يتطلب: مجموع تطويرات التنين (٦ مستويات)',
+    },
+  },
+];
+
+export const DRAGON_WING_PRESETS: DragonWingPreset[] = [
+  {
+    id: 'natural',
+    nameAr: 'النسيج الفطري الأصلي',
+    subtitleAr: 'أغشية وأعين متناغمة مع عنصر التنين',
+    swatchHex: '#94a3b8',
+    unlock: { kind: 'always', labelAr: 'متاح منذ البداية' },
+  },
+  {
+    id: 'ember_vein',
+    nameAr: 'عروق الجمر المتقدة',
+    subtitleAr: 'أغشية بركانية دافئة وبريق عيون كهرماني',
+    membraneColor: 0xea580c,
+    eyeColor: 0xfb923c,
+    emissiveTint: 0x7c2d12,
+    emissiveIntensity: 0.16,
+    swatchHex: '#f97316',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'breath',
+      level: 1,
+      labelAr: 'يتطلب: قوة النفث · مستوى ١',
+    },
+  },
+  {
+    id: 'aurora_frost',
+    nameAr: 'شفق الصقيع الفيروزي',
+    subtitleAr: 'أجنحة شفافة بلون السماء القطبية وبريق سماوي',
+    membraneColor: 0x0ea5e9,
+    eyeColor: 0x7dd3fc,
+    emissiveTint: 0x0c4a6e,
+    emissiveIntensity: 0.18,
+    swatchHex: '#38bdf8',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'wings',
+      level: 1,
+      labelAr: 'يتطلب: سرعة الأجنحة · مستوى ١',
+    },
+  },
+  {
+    id: 'abyssal_violet',
+    nameAr: 'غسق العاصفة البنفسجي',
+    subtitleAr: 'وهج أرجواني رعدي يعكس طاقة الطيران العالية',
+    membraneColor: 0x7c3aed,
+    eyeColor: 0xd8b4fe,
+    emissiveTint: 0x4c1d95,
+    emissiveIntensity: 0.22,
+    swatchHex: '#a855f7',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'wings',
+      level: 3,
+      labelAr: 'يتطلب: سرعة الأجنحة · مستوى ٣',
+    },
+  },
+  {
+    id: 'solar_gold',
+    nameAr: 'أجنحة الشفق الذهبي',
+    subtitleAr: 'غشاء ذهبي مضيء وعيون شمسية متوهجة',
+    membraneColor: 0xeab308,
+    eyeColor: 0xfef08a,
+    emissiveTint: 0x854d0e,
+    emissiveIntensity: 0.25,
+    swatchHex: '#facc15',
+    unlock: {
+      kind: 'dragon_upgrade',
+      key: 'breath',
+      level: 4,
+      labelAr: 'يتطلب: قوة النفث · مستوى ٤',
+    },
+  },
+];
+
 export interface ProgressionState {
   knightPoints: number;
   dragonPoints: number;
@@ -125,6 +451,7 @@ export interface ProgressionState {
   warWave: number;
   knightUpgrades: Record<KnightUpgradeKey, number>;
   dragonUpgrades: Record<DragonUpgradeKey, number>;
+  dragonAppearance: Record<DragonId, DragonAppearanceConfig>;
   loreElapsedSeconds: number;
   savedAt: number | null;
 }
@@ -144,9 +471,37 @@ export const DEFAULT_PROGRESSION: ProgressionState = {
     scales: 0,
     wings: 0,
   },
+  dragonAppearance: {
+    ignis: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID.ignis },
+    glacius: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID.glacius },
+    terra: { ...DEFAULT_DRAGON_APPEARANCE_BY_ID.terra },
+  },
   loreElapsedSeconds: 0,
   savedAt: null,
 };
+
+export function getTotalDragonUpgrades(progression: ProgressionState): number {
+  return (
+    progression.dragonUpgrades.breath +
+    progression.dragonUpgrades.scales +
+    progression.dragonUpgrades.wings
+  );
+}
+
+export function isAppearanceUnlocked(
+  req: AppearanceUnlockRequirement,
+  progression: ProgressionState,
+): boolean {
+  if (req.kind === 'always') return true;
+  if (req.kind === 'dragon_upgrade') {
+    return progression.dragonUpgrades[req.key] >= req.level;
+  }
+  if (req.kind === 'knight_upgrade') {
+    return progression.knightUpgrades[req.key] >= req.level;
+  }
+  return getTotalDragonUpgrades(progression) >= req.level;
+}
+
 
 export interface DragonSpec {
   id: DragonId;
@@ -401,7 +756,8 @@ export type ManeuverKind =
   | 'sharp_turn'
   | 'knife_edge'
   | 'half_loop'
-  | 'steep_dive';
+  | 'steep_dive'
+  | 'barrel_roll';
 
 export type FlightTipCategory = 'maneuver' | 'landmark';
 
@@ -450,6 +806,9 @@ export interface HudState {
   lightningActive: boolean;
   cameraView: CameraView;
   isLooping: boolean;
+  isBarrelRolling: boolean;
+  barrelRollCooldown: number;
+  barrelRollCooldownMax: number;
   knifeEdgeSide: -1 | 0 | 1;
   maneuverKind: ManeuverKind;
   maneuverSide: -1 | 0 | 1;
@@ -474,6 +833,9 @@ export interface HudState {
   isLorePlaying: boolean;
   knightSpeechText: string | null;
   spiritualBond: number;
+  isCommuning: boolean;
+  communeCooldown: number;
+  communeCooldownMax: number;
   fusionActive: boolean;
   fusionTimeLeft: number;
   fusionDuration: number;
